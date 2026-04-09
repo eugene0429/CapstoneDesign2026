@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 list:*)",
+      "Bash(python3 simulation.py --mode single --seed 42)",
+      "Bash(python3 -c ':*)",
+      "Bash(python -c ':*)",
+      "Bash(sort -t: -k2 -n)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('simulation.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}

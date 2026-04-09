@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('leveling_sim.py', doraise=True\\)\")",
+      "Bash(python3 -c \"import py_compile; py_compile.compile\\('leveling_sim.py', doraise=True\\)\")",
+      "Bash(python3 -c ':*)"
+    ]
+  }
+}

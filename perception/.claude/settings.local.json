@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp capture.py data_collection/capture.py)",
+      "Bash(cp utils.py data_collection/utils.py)",
+      "Bash(cp extract_frames.py data_collection/extract_frames.py)",
+      "Bash(cp organize_dataset.py data_collection/organize_dataset.py)",
+      "Bash(rm capture.py utils.py extract_frames.py organize_dataset.py)",
+      "Bash(rm -rf __pycache__)",
+      "Bash(python3 -c \"import pyrealsense2; print\\(pyrealsense2.__version__\\)\")",
+      "Bash(/Users/baeg-yujin/miniforge3/bin/python -c \"import pyrealsense2; print\\('miniforge:', pyrealsense2.__version__\\)\")",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.10/bin/python3 -c \"import pyrealsense2; print\\('system:', pyrealsense2.__version__\\)\")",
+      "Bash(ls \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/wrappers/python/\"*.so)",
+      "Bash(ls \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/\"Release/*.so)",
+      "Bash(ls \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/wrappers/python/\"*.dylib)",
+      "Bash(python -c ':*)",
+      "Bash(ls \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release/rs-\"*)",
+      "Bash(ls \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/tools/\"*/rs-*)",
+      "Bash(DYLD_LIBRARY_PATH=\"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release\" \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release/rs-enumerate-devices\")",
+      "Bash(ln -sf '/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release/pyrealsense2.cpython-310-darwin.so' /Users/baeg-yujin/miniforge3/lib/python3.10/site-packages/)",
+      "Bash(ln -sf '/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release/pyrsutils.cpython-310-darwin.so' /Users/baeg-yujin/miniforge3/lib/python3.10/site-packages/)",
+      "Bash(sudo ln:*)",
+      "Bash(otool -l '/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release/pyrealsense2.2.57.7.cpython-310-darwin.so')",
+      "Bash(ls \"/Users/baeg-yujin/Desktop/project/Capstone Design/venv/lib/python3.10/site-packages/pyrealsense2\"*)",
+      "Read(//usr/local/lib/**)",
+      "Read(//usr/local/lib/cmake/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(sudo -S /usr/local/bin/rs-enumerate-devices -s)",
+      "Bash(sudo -S install_name_tool -add_rpath /usr/local/lib /usr/local/bin/rs-enumerate-devices)",
+      "Bash(install_name_tool -add_rpath /usr/local/lib '/Users/baeg-yujin/Desktop/project/Capstone Design/perception/librealsense/build/Release/pyrealsense2.2.57.7.cpython-310-darwin.so')",
+      "Bash(sudo -S pip install scipy)",
+      "Bash(grep -r \"depth\" \"/Users/baeg-yujin/Desktop/project/Capstone Design/perception\" --include=\"*.py\" ! -path \"*/venv/*\" ! -path \"*/librealsense/*\" ! -path \"*/__pycache__/*\" -l)"
+    ]
+  }
+}
