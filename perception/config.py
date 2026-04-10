@@ -122,6 +122,17 @@ VIO = {
     "accel_bias_std": 0.01,            # 가속도계 바이어스 랜덤 워크
     "gyro_bias_std": 0.001,            # 자이로 바이어스 랜덤 워크
 
+    # IMU 초기 정렬/정지 상태 억제
+    "imu_init_samples": 200,           # 시작 시 정지 상태로 모을 IMU 샘플 수 (100Hz 기준 2초)
+    "gravity_magnitude": 9.81,         # 중력 가속도 크기 (m/s^2)
+    "stationary_accel_tol": 0.35,      # | |a|-g | 정지 판정 임계값
+    "stationary_gyro_tol": 0.08,       # |w| 정지 판정 임계값 (rad/s)
+    "zupt_velocity_reset": True,       # 정지 판정 시 속도 0으로 리셋
+    "zupt_position_damping": 1.0,      # 정지 판정 시 가속도 적분 억제량
+    "zupt_min_frames": 5,              # ZUPT 발동까지 연속 정지 판정 필요 프레임 수 (hysteresis)
+    "visual_velocity_alpha": 0.6,      # 비전 기반 속도 추정 반영 비율
+    "no_vision_velocity_damping": 0.98,# 비전 보정 실패 시 속도 감쇠
+
     # 초기 불확실성
     "init_pos_std": 0.01,
     "init_vel_std": 0.1,

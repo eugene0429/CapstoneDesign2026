@@ -62,6 +62,7 @@ class EKFState:
     """
 
     def __init__(self, config):
+        self.config = config
         self.position = np.zeros(3)
         self.velocity = np.zeros(3)
         self.orientation = np.eye(3)
@@ -82,8 +83,9 @@ class EKFState:
         self.gyro_noise = config["gyro_noise_std"]
         self.accel_bias_noise = config["accel_bias_std"]
         self.gyro_bias_noise = config["gyro_bias_std"]
+        self.gravity = np.array([0, config.get("gravity_magnitude", 9.81), 0], dtype=np.float64)
 
-    def predict(self, accel, gyro, dt):
+    def predict(self, accel, gyro, dt, stationary=False):
         """IMU 기반 상태 예측 (predict step)"""
         if dt <= 0 or dt > 0.5:
             return
@@ -91,10 +93,13 @@ class EKFState:
         accel = np.array(accel) - self.accel_bias
         gyro = np.array(gyro) - self.gyro_bias
 
-        GRAVITY = np.array([0, 0, -9.81])
-
         # 상태 전이
-        accel_world = self.orientation @ accel + GRAVITY
+        accel_world = self.orientation @ accel + self.gravity
+        if stationary:
+            damping = float(np.clip(self.config.get("zupt_position_damping", 1.0), 0.0, 1.0))
+            accel_world *= (1.0 - damping)
+            if self.config.get("zupt_velocity_reset", True):
+                self.velocity[:] = 0.0
         self.position += self.velocity * dt + 0.5 * accel_world * dt * dt
         self.velocity += accel_world * dt
 
@@ -180,6 +185,37 @@ def _skew(v):
     ])
 
 
+def _rotation_between_vectors(src, dst):
+    """src 벡터를 dst 벡터로 회전시키는 3x3 회전 행렬"""
+    src = np.array(src, dtype=np.float64)
+    dst = np.array(dst, dtype=np.float64)
+
+    src_norm = np.linalg.norm(src)
+    dst_norm = np.linalg.norm(dst)
+    if src_norm < 1e-8 or dst_norm < 1e-8:
+        return np.eye(3)
+
+    src = src / src_norm
+    dst = dst / dst_norm
+    cross = np.cross(src, dst)
+    dot = np.clip(np.dot(src, dst), -1.0, 1.0)
+    cross_norm = np.linalg.norm(cross)
+
+    if cross_norm < 1e-8:
+        if dot > 0:
+            return np.eye(3)
+
+        axis = np.array([1.0, 0.0, 0.0])
+        if abs(src[0]) > 0.9:
+            axis = np.array([0.0, 1.0, 0.0])
+        axis = axis - src * np.dot(axis, src)
+        axis = axis / np.linalg.norm(axis)
+        return Rotation.from_rotvec(axis * np.pi).as_matrix()
+
+    vx = _skew(cross)
+    return np.eye(3) + vx + vx @ vx * ((1.0 - dot) / (cross_norm ** 2))
+
+
 class VIOTracker:
     """Visual-Inertial Odometry 추적기"""
 
@@ -239,6 +275,15 @@ class VIOTracker:
             config["gyro_noise_std"],
         )
 
+        self.gravity_magnitude = config.get("gravity_magnitude", 9.81)
+        self.imu_init_samples_required = config.get("imu_init_samples", 200)
+        self.imu_init_accel_samples = []
+        self.imu_init_gyro_samples = []
+        self.imu_ready = False
+        self.last_visual_position = None
+        self.keyframe_pose = np.eye(4)
+        self._stationary_count = 0
+
         # 통계
         self.tracked_count = 0
         self.inlier_count = 0
@@ -267,12 +312,37 @@ class VIOTracker:
             if dt < 0 or dt > 1.0:
                 dt = 0.0
 
+        accel_cam = None
+        gyro_cam = None
+        if accel is not None:
+            # RealSense IMU (x-right, y-up, z-back) -> Camera Optical (x-right, y-down, z-forward)
+            accel_cam = np.array([accel[0], -accel[1], -accel[2]], dtype=np.float64)
+        if gyro is not None:
+            gyro_cam = np.array([gyro[0], -gyro[1], -gyro[2]], dtype=np.float64)
+
         # ── IMU predict ──
-        if accel is not None and gyro is not None and dt > 0:
-            self.ekf.predict(accel, gyro, dt)
+        if accel_cam is not None and gyro_cam is not None:
+            self._accumulate_imu_init(accel_cam, gyro_cam)
+            if not self.imu_ready and self._try_initialize_imu():
+                self.pose[:3, :3] = self.ekf.orientation
+                # 방향이 바뀌었으므로 keyframe 좌표계 무효화 → 다음 프레임에서 새 keyframe 생성
+                self.is_initialized = False
+                self.prev_points = None
+
+        if accel_cam is not None and gyro_cam is not None and dt > 0 and self.imu_ready:
+            if self._is_stationary(accel_cam, gyro_cam):
+                self._stationary_count += 1
+            else:
+                self._stationary_count = 0
+            zupt_min = self.config.get("zupt_min_frames", 5)
+            stationary = self._stationary_count >= zupt_min
+            self.ekf.predict(accel_cam, gyro_cam, dt, stationary=stationary)
 
         # ── 첫 프레임: 초기화 ──
         if not self.is_initialized:
+            if self.imu_ready:
+                self.pose[:3, :3] = self.ekf.orientation
+                self.pose[:3, 3] = self.ekf.position
             self._init_frame(gray, depth_m)
             self.prev_timestamp = timestamp
             return self.pose.copy()
@@ -296,9 +366,10 @@ class VIOTracker:
                 T_vision[:3, :3] = R_est
                 T_vision[:3, 3] = t_est.flatten()
 
-                if accel is not None and gyro is not None and dt > 0:
+                if accel_cam is not None and gyro_cam is not None and dt > 0 and self.imu_ready:
                     # EKF correction: 비전 관측으로 보정
                     self.ekf.correct_pose(t_est.flatten(), R_est)
+                    self._update_velocity_from_vision(t_est.flatten(), dt)
                     self.pose[:3, :3] = self.ekf.orientation
                     self.pose[:3, 3] = self.ekf.position
                 else:
@@ -306,15 +377,18 @@ class VIOTracker:
                     self.pose = T_vision
                     self.ekf.position = t_est.flatten()
                     self.ekf.orientation = R_est.copy()
+                    self._update_velocity_from_vision(t_est.flatten(), dt)
             else:
                 # PnP 실패 → IMU 예측만 사용
-                if accel is not None:
+                if self.imu_ready:
+                    self._damp_velocity_without_vision()
                     self.pose[:3, :3] = self.ekf.orientation
                     self.pose[:3, 3] = self.ekf.position
                 need_keyframe = True
         else:
             # 추적 실패 → 강제 키프레임
-            if accel is not None:
+            if self.imu_ready:
+                self._damp_velocity_without_vision()
                 self.pose[:3, :3] = self.ekf.orientation
                 self.pose[:3, 3] = self.ekf.position
             need_keyframe = True
@@ -330,6 +404,87 @@ class VIOTracker:
 
         self.prev_timestamp = timestamp
         return self.pose.copy()
+
+    def _accumulate_imu_init(self, accel_cam, gyro_cam):
+        """초기 정지 구간 IMU 평균값 수집 (정지 상태 확인 포함)"""
+        if self.imu_ready:
+            return
+
+        # 정지 상태 확인: 가속도 크기가 중력에서 많이 벗어나거나 자이로가 크면 움직이는 것
+        accel_norm = np.linalg.norm(accel_cam)
+        gyro_norm = np.linalg.norm(gyro_cam)
+        if abs(accel_norm - self.gravity_magnitude) > 1.5 or gyro_norm > 0.3:
+            # 움직임 감지: 수집된 샘플 초기화
+            self.imu_init_accel_samples.clear()
+            self.imu_init_gyro_samples.clear()
+            return
+
+        self.imu_init_accel_samples.append(accel_cam.copy())
+        self.imu_init_gyro_samples.append(gyro_cam.copy())
+
+        max_keep = max(self.imu_init_samples_required, 1)
+        if len(self.imu_init_accel_samples) > max_keep:
+            self.imu_init_accel_samples = self.imu_init_accel_samples[-max_keep:]
+        if len(self.imu_init_gyro_samples) > max_keep:
+            self.imu_init_gyro_samples = self.imu_init_gyro_samples[-max_keep:]
+
+    def _try_initialize_imu(self):
+        """초기 IMU 평균으로 자세/바이어스 초기화"""
+        if self.imu_ready or len(self.imu_init_accel_samples) < self.imu_init_samples_required:
+            return False
+
+        accel_samples = np.array(self.imu_init_accel_samples)
+        gyro_samples = np.array(self.imu_init_gyro_samples)
+
+        # 분산 확인: 샘플이 너무 불안정하면 초기화 거부 후 재수집
+        accel_std = np.std(accel_samples, axis=0)
+        if np.max(accel_std) > 0.4:
+            self.imu_init_accel_samples.clear()
+            self.imu_init_gyro_samples.clear()
+            return False
+
+        accel_mean = np.mean(accel_samples, axis=0)
+        gyro_mean = np.mean(gyro_samples, axis=0)
+        accel_norm = np.linalg.norm(accel_mean)
+        if accel_norm < 1e-6:
+            return False
+
+        target_up = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+        self.ekf.orientation = _rotation_between_vectors(accel_mean, target_up)
+        self.ekf.gyro_bias = gyro_mean
+
+        expected_specific_force = accel_mean / accel_norm * self.gravity_magnitude
+        self.ekf.accel_bias = accel_mean - expected_specific_force
+        self.imu_ready = True
+        return True
+
+    def _is_stationary(self, accel_cam, gyro_cam):
+        """바이어스 보정 후 IMU가 정지 상태인지 판별"""
+        accel_unbiased = accel_cam - self.ekf.accel_bias
+        gyro_unbiased = gyro_cam - self.ekf.gyro_bias
+        accel_norm = np.linalg.norm(accel_unbiased)
+        gyro_norm = np.linalg.norm(gyro_unbiased)
+
+        accel_tol = self.config.get("stationary_accel_tol", 0.35)
+        gyro_tol = self.config.get("stationary_gyro_tol", 0.08)
+        return (
+            abs(accel_norm - self.gravity_magnitude) < accel_tol
+            and gyro_norm < gyro_tol
+        )
+
+    def _update_velocity_from_vision(self, measured_position, dt):
+        """비전 위치 변화량으로 속도 상태를 다시 고정"""
+        measured_position = np.array(measured_position, dtype=np.float64)
+        if self.last_visual_position is not None and dt > 1e-4:
+            visual_velocity = (measured_position - self.last_visual_position) / dt
+            alpha = float(np.clip(self.config.get("visual_velocity_alpha", 0.6), 0.0, 1.0))
+            self.ekf.velocity = (1.0 - alpha) * self.ekf.velocity + alpha * visual_velocity
+        self.last_visual_position = measured_position.copy()
+
+    def _damp_velocity_without_vision(self):
+        """비전이 잠시 끊길 때 관성으로 계속 밀리는 현상 완화"""
+        damping = float(np.clip(self.config.get("no_vision_velocity_damping", 0.98), 0.0, 1.0))
+        self.ekf.velocity *= damping
 
     def _init_frame(self, gray, depth_m):
         """키프레임 초기화: 새 특징점 검출 + 3D 좌표 계산"""
@@ -352,6 +507,8 @@ class VIOTracker:
             self.prev_gray = gray
             self.prev_points = valid_2d
             self.prev_points_3d = valid_3d
+            self.keyframe_pose = self.pose.copy()
+            self.last_visual_position = None  # keyframe 전환 시 cross-keyframe 속도 계산 방지
             self.frames_since_keyframe = 0
             self.is_initialized = True
 
@@ -431,10 +588,11 @@ class VIOTracker:
         if len(points_2d) < 4:
             return False, None, None, None
 
-        # 3D 좌표를 현재 월드 프레임으로 변환
-        R_prev = self.pose[:3, :3]
-        t_prev = self.pose[:3, 3]
-        world_3d = (R_prev @ points_3d.T).T + t_prev
+        # 3D 좌표를 keyframe 당시의 포즈로 월드 프레임 변환
+        # self.pose 대신 keyframe_pose 사용: 프레임마다 pose가 바뀌어도 3D점 기준이 흔들리지 않음
+        R_kf = self.keyframe_pose[:3, :3]
+        t_kf = self.keyframe_pose[:3, 3]
+        world_3d = (R_kf @ points_3d.T).T + t_kf
 
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
             world_3d.astype(np.float64),
@@ -497,5 +655,12 @@ class VIOTracker:
         self.is_initialized = False
         self.prev_timestamp = None
         self.ekf = EKFState(self.config)
+        self.imu_preint.reset()
+        self.imu_init_accel_samples.clear()
+        self.imu_init_gyro_samples.clear()
+        self.imu_ready = False
+        self.last_visual_position = None
+        self.keyframe_pose = np.eye(4)
+        self._stationary_count = 0
         self.tracked_count = 0
         self.inlier_count = 0

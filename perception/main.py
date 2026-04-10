@@ -32,6 +32,10 @@ def main():
         "--model", type=str, default=None,
         help="YOLO 모델 경로 (detect 모드에서 사용)",
     )
+    parser.add_argument(
+        "--no-imu", action="store_true",
+        help="IMU를 끄고 Visual-Only 모드로 실행 (vio 모드 전용)",
+    )
 
     args, remaining = parser.parse_known_args()
 
@@ -45,7 +49,7 @@ def main():
 
     elif args.mode == "vio":
         from vio.vio_runner import run_vio
-        run_vio()
+        run_vio(use_imu=(not args.no_imu))
 
     elif args.mode == "detect":
         print("[DETECT] 타겟 디텍션 + 3D 위치 추정 모드")

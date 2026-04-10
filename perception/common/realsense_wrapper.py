@@ -48,9 +48,10 @@ class RealSenseCamera:
 
         # IMU 스트림 (VIO에서 사용)
         if self.config.get("enable_imu", False):
-            # 주파수를 강제하지 않고, 포맷만 지정하여 SDK가 가능한 값을 찾도록 허용
-            rs_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f)
-            rs_config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f)
+            # Ubuntu/Linux 환경에서 'Couldn't resolve requests' 에러 방지를 위해 FPS 명시
+            # D435i 표준 설정: Accel=100Hz, Gyro=200Hz
+            rs_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 100)
+            rs_config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f, 200)
 
         try:
             self.profile = self.pipeline.start(rs_config)
@@ -76,6 +77,11 @@ class RealSenseCamera:
 
         # IR 이미터 설정
         device = self.profile.get_device()
+        # 모든 센서에 대해 Global Time 활성화 (타임스탬프 동기화 정밀도 향상)
+        for s in device.query_sensors():
+            if s.supports(rs.option.global_time_enabled):
+                s.set_option(rs.option.global_time_enabled, 1)
+
         self.depth_sensor = device.first_depth_sensor()
         emitter = 1 if self.config.get("enable_ir_emitter", False) else 0
         self.depth_sensor.set_option(rs.option.emitter_enabled, emitter)
