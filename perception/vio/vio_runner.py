@@ -1,6 +1,6 @@
 """
-VIO 실시간 실행 루프
-RealSense D435i 카메라로 VIO 측위를 실행하고 결과를 시각화
+VIO Real-time Execution Loop
+Runs VIO localization with RealSense D435i and visualizes results
 """
 
 import cv2
@@ -12,15 +12,17 @@ from common.realsense_wrapper import RealSenseCamera, apply_depth_colormap
 
 
 def draw_overlay(image, tracker, fps):
-    """VIO 상태 오버레이 표시"""
+    """Display VIO status overlay"""
     stats = tracker.get_stats()
     pos = tracker.get_position()
     euler = tracker.get_euler_degrees()
 
+    imu_state = "IMU" if stats.get("imu_ready") else "VO"
+    zupt_flag = " ZUPT" if stats.get("stationary") else ""
     lines = [
-        f"FPS: {fps:.1f}",
+        f"FPS: {fps:.1f}  [{imu_state}{zupt_flag}]",
         f"Features: {stats['tracked_features']} | Inliers: {stats['inliers']}",
-        f"Keyframe age: {stats['frames_since_keyframe']}",
+        f"Keyframe age: {stats['frames_since_keyframe']}  |Vel|={stats.get('ekf_vel_norm', 0):.3f}m/s",
         f"Pos: X={pos[0]:.3f} Y={pos[1]:.3f} Z={pos[2]:.3f} m",
         f"Rot: R={euler[0]:.1f} P={euler[1]:.1f} Y={euler[2]:.1f} deg",
     ]
@@ -36,28 +38,35 @@ def draw_overlay(image, tracker, fps):
 
 
 def draw_trajectory(traj_image, positions, scale=100, size=400):
-    """2D 궤적 (XZ 평면, top-down view) 그리기"""
-    traj_image[:] = 40  # 어두운 배경
+    """Draw 2D trajectory (XZ plane, top-down view)"""
+    traj_image[:] = 40  # Dark background
 
     center = np.array([size // 2, size // 2])
 
     if len(positions) < 2:
         return traj_image
 
+    def _to_pt(p, c, s, sz):
+        x = int(np.clip(c[0] + p[0] * s, 0, sz - 1))
+        y = int(np.clip(c[1] - p[2] * s, 0, sz - 1))
+        return (x, y)
+
     for i in range(1, len(positions)):
         p0 = positions[i - 1]
         p1 = positions[i]
-        # XZ 평면 투영
-        pt0 = (int(center[0] + p0[0] * scale), int(center[1] - p0[2] * scale))
-        pt1 = (int(center[0] + p1[0] * scale), int(center[1] - p1[2] * scale))
+        # Skip NaN/inf values
+        if not (np.isfinite(p0).all() and np.isfinite(p1).all()):
+            continue
+        pt0 = _to_pt(p0, center, scale, size)
+        pt1 = _to_pt(p1, center, scale, size)
         cv2.line(traj_image, pt0, pt1, (0, 255, 0), 1, cv2.LINE_AA)
 
-    # 현재 위치
+    # Current position
     cur = positions[-1]
     cur_pt = (int(center[0] + cur[0] * scale), int(center[1] - cur[2] * scale))
     cv2.circle(traj_image, cur_pt, 4, (0, 0, 255), -1)
 
-    # 축 표시
+    # Axis labels
     cv2.putText(traj_image, "X", (size - 20, size // 2 + 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
     cv2.putText(traj_image, "Z", (size // 2 + 5, 15),
@@ -68,21 +77,20 @@ def draw_trajectory(traj_image, positions, scale=100, size=400):
     return traj_image
 
 
-def run_vio(use_imu=True):
-    """VIO 메인 루프"""
+def _init_vio(use_imu):
+    """Common VIO initialization: camera reset, start, warmup, tracker creation"""
     cam_config = {**CAMERA, "enable_imu": use_imu}
 
     if use_imu:
-        print("[VIO] Visual-Inertial Odometry (VIO) 모드로 시작 (IMU 켜짐)")
+        print("[VIO] Starting in Visual-Inertial Odometry (VIO) mode (IMU enabled)")
     else:
-        print("[VIO] Visual-Only Odometry 모드로 시작 (IMU 꺼짐)")
+        print("[VIO] Starting in Visual-Only Odometry mode (IMU disabled)")
 
-    # 카메라 하드웨어 리셋 후 안정화 대기
     import pyrealsense2 as rs
     ctx = rs.context()
     devices = ctx.query_devices()
     if len(devices) > 0:
-        print("[VIO] 카메라 하드웨어 리셋 중...")
+        print("[VIO] Performing camera hardware reset...")
         devices[0].hardware_reset()
         time.sleep(5)
 
@@ -92,13 +100,83 @@ def run_vio(use_imu=True):
 
     from vio.vio_tracker import VIOTracker
     tracker = VIOTracker(camera.get_intrinsics(), VIO_CONFIG)
+    return camera, tracker
 
-    # 궤적 기록
+
+def run_vio_headless(use_imu=True):
+    """Headless VIO loop — prints world-frame (x, y, theta) to terminal.
+
+    World coordinate convention (camera starts at origin):
+      - world X = camera Z (forward)
+      - world Y = camera -X (left)
+      - theta   = yaw angle (rad), CCW positive viewed from above
+    """
+    import math
+
+    camera, tracker = _init_vio(use_imu)
+
+    print("[VIO] Headless mode — world-frame (x, y, theta) output")
+    print("[VIO] Press Ctrl+C to stop")
+    print(f"{'time_s':>8s}  {'x_m':>8s}  {'y_m':>8s}  {'theta_deg':>10s}  {'fps':>5s}")
+
+    frame_count = 0
+    fps = 0.0
+    t_start = time.time()
+
+    try:
+        while True:
+            data = camera.get_frames_vio()
+            if data is None:
+                continue
+
+            tracker.update(
+                color_image=data['color'],
+                depth_image=data['depth'],
+                accel=data['accel'],
+                gyro=data['gyro'],
+                timestamp=data['timestamp'],
+            )
+
+            # FPS
+            frame_count += 1
+            elapsed = time.time() - t_start
+            if elapsed >= 1.0:
+                fps = frame_count / elapsed
+                frame_count = 0
+                t_start = time.time()
+
+            # Camera frame → world frame
+            pos = tracker.get_position()      # (x, y, z) in camera frame
+            R = tracker.get_rotation()         # 3x3 rotation matrix
+
+            world_x = pos[2]                   # camera Z = forward
+            world_y = -pos[0]                  # camera -X = left
+
+            # Yaw: angle of forward direction on ground plane
+            forward = R[:, 2]                  # camera Z column
+            theta_rad = math.atan2(-forward[0], forward[2])
+            theta_deg = math.degrees(theta_rad)
+
+            ts = data['timestamp']
+            print(f"\r{ts:8.2f}  {world_x:8.3f}  {world_y:8.3f}  {theta_deg:10.2f}  {fps:5.1f}", end="", flush=True)
+
+    except KeyboardInterrupt:
+        print("\n[VIO] Stopped (Ctrl+C)")
+    finally:
+        camera.stop()
+        print("[VIO] Shutdown complete")
+
+
+def run_vio(use_imu=True):
+    """VIO main loop with GUI visualization"""
+    camera, tracker = _init_vio(use_imu)
+
+    # Trajectory history
     positions = []
     traj_size = 400
     traj_image = np.zeros((traj_size, traj_size, 3), dtype=np.uint8)
 
-    print("[VIO] 실행 중... 'q' 키로 종료, 'r' 키로 리셋")
+    print("[VIO] Running... press 'q' to quit, 'r' to reset")
 
     frame_count = 0
     fps = 0.0
@@ -118,7 +196,7 @@ def run_vio(use_imu=True):
                 timestamp=data['timestamp'],
             )
 
-            # FPS 계산
+            # FPS calculation
             frame_count += 1
             elapsed = time.time() - t_start
             if elapsed >= 1.0:
@@ -126,32 +204,32 @@ def run_vio(use_imu=True):
                 frame_count = 0
                 t_start = time.time()
 
-            # 궤적 기록
+            # Record trajectory
             pos = tracker.get_position()
             positions.append(pos.copy())
             if len(positions) > 2000:
-                positions = positions[-1000:]
+                positions[:] = positions[1000:]
 
-            # 시각화
+            # Visualization
             display = data['color'].copy()
             draw_overlay(display, tracker, fps)
 
-            # 추적 중인 특징점 표시
+            # Draw tracked feature points
             if tracker.prev_points is not None and len(tracker.prev_points) > 0:
                 for pt in tracker.prev_points:
                     cv2.circle(display, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1)
 
-            # 궤적 그리기
+            # Draw trajectory
             draw_trajectory(traj_image, positions, scale=100, size=traj_size)
 
-            # 깊이 컬러맵 (캡처 모드처럼 rs.colorizer 적용)
+            # Depth colormap (apply rs.colorizer like in capture mode)
             depth_color = apply_depth_colormap(
-                data['depth'], 
-                depth_frame=data.get('depth_frame'), 
+                data['depth'],
+                depth_frame=data.get('depth_frame'),
                 colorizer=camera.colorizer
             )
 
-            # 레이아웃: [카메라 뷰 | 깊이 | 궤적]
+            # Layout: [camera view | depth | trajectory]
             depth_resized = cv2.resize(depth_color, (traj_size, traj_size))
             display_resized = cv2.resize(display, (int(traj_size * display.shape[1] / display.shape[0]), traj_size))
 
@@ -164,11 +242,11 @@ def run_vio(use_imu=True):
             elif key == ord('r'):
                 tracker.reset()
                 positions.clear()
-                print("[VIO] 리셋 완료")
+                print("[VIO] Reset complete")
 
     except KeyboardInterrupt:
-        print("\n[VIO] 종료 (Ctrl+C)")
+        print("\n[VIO] Stopped (Ctrl+C)")
     finally:
         cv2.destroyAllWindows()
         camera.stop()
-        print("[VIO] 종료 완료")
+        print("[VIO] Shutdown complete")

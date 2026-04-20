@@ -1,11 +1,11 @@
 """
-Perception 모듈 통합 진입점
-============================
+Perception Module - Unified Entry Point
+=======================================
 
-3가지 모드로 실행 가능:
-  python main.py capture     → 데이터 수집
-  python main.py vio         → VIO 측위 테스트
-  python main.py detect      → 타겟 디텍션 + 3D 위치 추정
+Supports 3 run modes:
+  python main.py capture     → Data collection
+  python main.py vio         → VIO localization test
+  python main.py detect      → Target detection + 3D position estimation
 """
 
 import argparse
@@ -14,47 +14,71 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(
-        description="RealSense D435i Perception 모듈",
+        description="RealSense D435i Perception Module",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-모드 설명:
-  capture   RealSense 카메라로 YOLO 학습 데이터 수집
-  vio       Visual-Inertial Odometry 기반 실시간 측위
-  detect    타겟 디텍션 + 깊이 기반 3D 위치 추정
+Mode descriptions:
+  capture   Collect YOLO training data with RealSense camera
+  vio       Real-time localization via Visual-Inertial Odometry (custom implementation)
+  orbslam   ORB-SLAM3 RGB-D-Inertial localization test
+  detect    Target detection + depth-based 3D position estimation
         """,
     )
     parser.add_argument(
         "mode",
-        choices=["capture", "vio", "detect"],
-        help="실행 모드 선택",
+        choices=["capture", "vio", "detect", "orbslam"],
+        help="Select run mode",
     )
     parser.add_argument(
         "--model", type=str, default=None,
-        help="YOLO 모델 경로 (detect 모드에서 사용)",
+        help="YOLO model path (used in detect mode)",
     )
     parser.add_argument(
         "--no-imu", action="store_true",
-        help="IMU를 끄고 Visual-Only 모드로 실행 (vio 모드 전용)",
+        help="Disable IMU and run in Visual-Only mode (shared by vio / orbslam)",
+    )
+    parser.add_argument(
+        "--pi", action="store_true",
+        help="Pi optimization mode: 424x240@15fps, nFeatures=500, viewer OFF (orbslam only)",
+    )
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Headless mode: no GUI, print world-frame (x, y, theta) to terminal (vio only)",
     )
 
     args, remaining = parser.parse_known_args()
 
     if args.mode == "capture":
         from data_collection.capture import RealsenseCapture, parse_args
-        # 남은 인자를 capture의 argparse에 전달
+        # Pass remaining args to capture's argparse
         sys.argv = [sys.argv[0]] + remaining
         capture_args = parse_args()
         capture = RealsenseCapture(capture_args)
         capture.start()
 
     elif args.mode == "vio":
-        from vio.vio_runner import run_vio
-        run_vio(use_imu=(not args.no_imu))
+        if args.headless:
+            from vio.vio_runner import run_vio_headless
+            run_vio_headless(use_imu=(not args.no_imu))
+        else:
+            from vio.vio_runner import run_vio
+            run_vio(use_imu=(not args.no_imu))
+
+    elif args.mode == "orbslam":
+        import os
+        if args.pi or args.headless:
+            os.environ["ORBSLAM_NO_VIEWER"] = "1"
+        if args.headless:
+            from vio.orbslam_runner import run_orbslam_headless
+            run_orbslam_headless(use_imu=(not args.no_imu), pi_mode=args.pi)
+        else:
+            from vio.orbslam_runner import run_orbslam
+            run_orbslam(use_imu=(not args.no_imu), pi_mode=args.pi)
 
     elif args.mode == "detect":
-        print("[DETECT] 타겟 디텍션 + 3D 위치 추정 모드")
-        print("[TODO] 디텍션 파이프라인 구현 필요")
-        print("  → detection/detector.py, detection/position_estimator.py 참조")
+        print("[DETECT] Target detection + 3D position estimation mode")
+        print("[TODO] Detection pipeline not yet implemented")
+        print("  → See detection/detector.py, detection/position_estimator.py")
 
 
 if __name__ == "__main__":

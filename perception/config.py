@@ -1,36 +1,36 @@
 """
-RealSense D435i Perception 설정 파일
-데이터 수집 / VIO 측위 / 타겟 디텍션 통합 설정
+RealSense D435i Perception Configuration
+Data collection / VIO localization / Target detection unified settings
 """
 
 import os
 
 # ============================================================
-# 카메라 설정
+# Camera settings
 # ============================================================
 CAMERA = {
-    # 컬러 스트림 해상도 및 FPS
+    # Color stream resolution and FPS
     "color_width": 640,
     "color_height": 480,
     "color_fps": 30,
 
-    # 깊이 스트림 해상도 및 FPS
+    # Depth stream resolution and FPS
     "depth_width": 640,
     "depth_height": 480,
     "depth_fps": 30,
 
-    # Depth → Color 정렬 활성화
+    # Enable Depth → Color alignment
     "align_depth_to_color": True,
 
-    # IR 이미터 활성화 (스테레오 매칭 품질 향상에 필수)
+    # Enable IR emitter (required for stereo matching quality)
     "enable_ir_emitter": True,
 
-    # IMU 스트림 활성화 (VIO에서 사용)
+    # Enable IMU stream (used by VIO)
     "enable_imu": False,
 }
 
 # ============================================================
-# 저장 경로 설정
+# Storage path settings
 # ============================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
@@ -44,27 +44,27 @@ PATHS = {
 }
 
 # ============================================================
-# 캡처 설정
+# Capture settings
 # ============================================================
 CAPTURE = {
-    # 자동 캡처 간격 (초)
+    # Auto capture interval (seconds)
     "auto_interval": 0.5,
 
-    # 이미지 저장 포맷
+    # Image save format
     "image_format": ".jpg",
-    "image_quality": 95,       # JPEG 품질 (0-100)
+    "image_quality": 95,       # JPEG quality (0-100)
 
-    # 깊이 이미지 저장 포맷 (16bit PNG로 원본 깊이값 보존)
+    # Depth image save format (16bit PNG to preserve raw depth values)
     "depth_format": ".png",
 
-    # 비디오 코덱
+    # Video codec
     "video_codec": "mp4v",
     "video_format": ".mp4",
     "video_fps": 30,
 }
 
 # ============================================================
-# 시각화 설정
+# Display settings
 # ============================================================
 DISPLAY = {
     "window_name": "RealSense D435i - YOLO Data Capture",
@@ -77,75 +77,113 @@ DISPLAY = {
 }
 
 # ============================================================
-# YOLO 데이터셋 구조 설정
+# YOLO dataset structure settings
 # ============================================================
 YOLO = {
-    # 클래스 목록 (필요에 따라 수정)
+    # Class list (modify as needed)
     "classes": [
         # "class_0",
         # "class_1",
     ],
-    # Train/Val 비율
+    # Train/Val split ratio
     "train_ratio": 0.8,
     "val_ratio": 0.2,
 }
 
 # ============================================================
-# VIO 설정
+# VIO settings
 # ============================================================
 VIO = {
-    # 특징점 검출기
+    # Feature detector
     "feature_type": "FAST",
     "fast_threshold": 20,
     "max_features": 300,
 
-    # Lucas-Kanade Optical Flow 파라미터
+    # Lucas-Kanade Optical Flow parameters
     "lk_win_size": (21, 21),
     "lk_max_level": 3,
 
-    # 키프레임 판별 기준
-    "keyframe_min_features": 80,       # 추적 특징점이 이 이하로 떨어지면 키프레임
-    "keyframe_max_interval": 10,       # 최대 키프레임 간격 (프레임 수)
+    # Keyframe selection criteria
+    "keyframe_min_features": 80,       # Trigger keyframe when tracked features fall below this
+    "keyframe_max_interval": 10,       # Maximum keyframe interval (frames)
 
-    # PnP RANSAC 파라미터
-    "pnp_reproj_threshold": 3.0,       # 리프로젝션 오차 임계값 (px)
+    # PnP RANSAC parameters
+    "pnp_reproj_threshold": 3.0,       # Reprojection error threshold (px)
     "pnp_confidence": 0.99,
-    "pnp_min_inliers": 10,             # 최소 인라이어 수
+    "pnp_min_inliers": 10,             # Minimum number of inliers
 
-    # 깊이 필터
-    "depth_min": 0.3,                  # 최소 깊이 (m)
-    "depth_max": 5.0,                  # 최대 깊이 (m)
+    # Depth filter
+    "depth_min": 0.3,                  # Minimum depth (m)
+    "depth_max": 5.0,                  # Maximum depth (m)
 
-    # EKF IMU 노이즈 파라미터
-    "accel_noise_std": 0.1,            # 가속도계 노이즈 (m/s^2)
-    "gyro_noise_std": 0.01,            # 자이로스코프 노이즈 (rad/s)
-    "accel_bias_std": 0.01,            # 가속도계 바이어스 랜덤 워크
-    "gyro_bias_std": 0.001,            # 자이로 바이어스 랜덤 워크
+    # ── EKF IMU noise parameters ──
+    # Approximate values based on D435i BMI055
+    "accel_noise_std": 0.1,            # Accelerometer measurement noise std (m/s²/sample)
+    "gyro_noise_std": 0.01,            # Gyroscope measurement noise std (rad/s/sample)
+    "accel_bias_std": 0.005,           # Accelerometer bias random walk coefficient (m/s²/√s)
+    "gyro_bias_std": 0.0005,           # Gyroscope bias random walk coefficient (rad/s²/√s)
+    "max_accel_bias": 0.5,             # Accelerometer bias clipping limit (m/s²)
+    "max_gyro_bias": 0.15,             # Gyroscope bias clipping limit (rad/s)
 
-    # IMU 초기 정렬/정지 상태 억제
-    "imu_init_samples": 200,           # 시작 시 정지 상태로 모을 IMU 샘플 수 (100Hz 기준 2초)
-    "gravity_magnitude": 9.81,         # 중력 가속도 크기 (m/s^2)
-    "stationary_accel_tol": 0.35,      # | |a|-g | 정지 판정 임계값
-    "stationary_gyro_tol": 0.08,       # |w| 정지 판정 임계값 (rad/s)
-    "zupt_velocity_reset": True,       # 정지 판정 시 속도 0으로 리셋
-    "zupt_position_damping": 1.0,      # 정지 판정 시 가속도 적분 억제량
-    "zupt_min_frames": 5,              # ZUPT 발동까지 연속 정지 판정 필요 프레임 수 (hysteresis)
-    "visual_velocity_alpha": 0.6,      # 비전 기반 속도 추정 반영 비율
-    "no_vision_velocity_damping": 0.98,# 비전 보정 실패 시 속도 감쇠
+    # ── IMU initialization / stationary detection ──
+    "imu_init_samples": 200,           # IMU samples to collect while stationary (2s at 100Hz)
+    "gravity_magnitude": 9.81,         # Gravitational acceleration magnitude (m/s²)
+    "stationary_accel_tol": 0.35,      # | |a_unbiased| - g | threshold for stationary detection (m/s²)
+    "stationary_gyro_tol": 0.08,       # |ω_unbiased| threshold for stationary detection (rad/s)
 
-    # 초기 불확실성
+    # ── ZUPT (Zero-velocity UPdate) ──
+    # Uses EKF measurement update instead of hard reset → preserves covariance consistency
+    "zupt_vel_noise": 0.02,            # ZUPT measurement noise std (m/s) — smaller = stronger zero-velocity constraint
+    "zupt_position_damping": 1.0,      # Acceleration integration suppression during stationary (0~1, 1=full suppression)
+    "zupt_min_frames": 2,              # Consecutive stationary frames required before ZUPT triggers (hysteresis)
+
+    # ── Vision velocity measurement noise ──
+    # Noise std when using vision finite-difference velocity as EKF measurement (m/s)
+    # Smaller = stronger constraint (too small propagates PnP noise into velocity)
+    "visual_vel_noise": 0.3,
+    "max_visual_vel": 3.0,             # Maximum allowed visual velocity (m/s); rejected if exceeded
+
+    # ── PnP result validity check ──
+    "pnp_max_position_jump": 0.5,      # Maximum allowed PnP position deviation from EKF prediction (m)
+
+    # ── Non-Holonomic Constraint (NHC) — ground robots only ──
+    # Enable for tank/wheel rovers that have no lateral or vertical motion
+    # Applied every frame even while moving → constrains drift direction to forward only
+    "enable_nhc": True,                # True for ground robots, False for drones/handheld
+    "nhc_lateral_noise": 0.05,         # Lateral velocity constraint noise (m/s); smaller = stronger
+    "nhc_vertical_noise": 0.02,        # Vertical velocity constraint noise (m/s)
+
+    # ── Velocity damping when vision correction is unavailable ──
+    # 0.85^30fps ≈ 0.004/s → velocity decays to ~0 within 0.5s
+    "no_vision_velocity_damping": 0.85,
+
+    # ── PnP observation noise (baseline for adaptive scaling) ──
+    "pnp_pos_noise": 0.03,             # Baseline position observation noise (m)
+    "pnp_rot_noise": 0.015,            # Baseline orientation observation noise (rad)
+
+    # ── Depth sampling ──
+    "depth_sample_window": 3,          # Neighborhood pixel median depth sampling window size
+
+    # ── Keyframe trigger thresholds ──
+    "keyframe_max_rotation_deg": 15.0, # Rotation trigger relative to keyframe (degrees)
+    "keyframe_max_translation": 0.3,   # Translation trigger relative to keyframe (m)
+
+    # ── Numerical stability ──
+    "normalize_rotation_interval": 30, # SO(3) re-normalization period (frames)
+
+    # ── Initial uncertainty ──
     "init_pos_std": 0.01,
-    "init_vel_std": 0.1,
-    "init_att_std": 0.01,
+    "init_vel_std": 0.5,               # Larger initial velocity uncertainty for faster cross-covariance buildup
+    "init_att_std": 0.05,
     "init_bias_std": 0.1,
 }
 
 # ============================================================
-# 디텍션 설정
+# Detection settings
 # ============================================================
 DETECTION = {
-    # YOLO 모델 경로
+    # YOLO model path
     "model_path": os.path.join(BASE_DIR, "models", "best.pt"),
-    # 최소 confidence 임계값
+    # Minimum confidence threshold
     "confidence_threshold": 0.5,
 }

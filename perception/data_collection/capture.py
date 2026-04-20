@@ -1,21 +1,21 @@
 """
-RealSense D435i - YOLO 학습 데이터 캡처 도구
-=============================================
+RealSense D435i - YOLO Training Data Capture Tool
+==================================================
 
-기능:
-  [S] 수동 캡처 - 현재 프레임을 이미지로 저장
-  [A] 자동 캡처 - 설정된 간격으로 자동 저장 (토글)
-  [R] 비디오 녹화 - MP4 영상 녹화 시작/중지 (토글)
-  [D] 깊이 뷰 - 깊이 이미지 표시 토글
-  [+/-] 해상도 변경 - 캡처 해상도 전환
-  [Q] 종료
+Controls:
+  [S] Manual capture  - Save current frame as image
+  [A] Auto capture    - Toggle automatic capture at configured interval
+  [R] Video recording - Toggle MP4 recording start/stop
+  [D] Depth view      - Toggle depth image display
+  [+/-] Resolution    - Switch capture resolution
+  [Q] Quit
 
-사용법:
+Usage:
   python capture.py
-  python capture.py --no-depth         # 깊이 저장 없이 컬러만
-  python capture.py --auto 1.0         # 자동 캡처 간격 1초
-  python capture.py --prefix obj       # 파일명 접두사 지정
-  python capture.py --resolution 1280  # 해상도 지정
+  python capture.py --no-depth         # Color only, no depth save
+  python capture.py --auto 1.0         # Auto capture every 1 second
+  python capture.py --prefix obj       # Specify filename prefix
+  python capture.py --resolution 1280  # Specify resolution
 """
 
 import argparse
@@ -42,7 +42,7 @@ from data_collection.utils import (
 
 
 class RealsenseCapture:
-    """RealSense D435i 캡처 컨트롤러"""
+    """RealSense D435i capture controller"""
 
     def __init__(self, args):
         self.args = args
@@ -50,7 +50,7 @@ class RealsenseCapture:
         self.profile = None
         self.align = None
 
-        # 상태 변수
+        # State variables
         self.capture_count = 0
         self.is_recording = False
         self.is_auto_capture = False
@@ -62,50 +62,50 @@ class RealsenseCapture:
         self.start_time = time.time()
 
     def start(self):
-        """캡처 세션 시작"""
+        """Start capture session"""
         print("=" * 60)
-        print("  RealSense D435i - YOLO 학습 데이터 캡처 도구")
+        print("  RealSense D435i - YOLO Training Data Capture Tool")
         print("=" * 60)
 
-        # 디렉터리 생성
+        # Create directories
         create_directories()
 
-        # 파이프라인 초기화
+        # Initialize pipeline
         try:
             self.pipeline, self.profile, self.align = init_realsense_pipeline()
         except Exception as e:
-            print(f"\n[ERROR] RealSense 카메라 연결 실패: {e}")
-            print("  → 카메라가 USB 3.0 포트에 연결되어 있는지 확인하세요.")
-            print("  → 다른 프로그램이 카메라를 사용 중인지 확인하세요.")
+            print(f"\n[ERROR] RealSense camera connection failed: {e}")
+            print("  → Check that the camera is connected to a USB 3.0 port.")
+            print("  → Check that no other program is using the camera.")
             sys.exit(1)
 
-        # 카메라 안정화 대기
-        print("\n[INFO] 카메라 안정화 중...")
+        # Wait for camera to stabilize
+        print("\n[INFO] Warming up camera...")
         for _ in range(30):
             self.pipeline.wait_for_frames()
-        print("[INFO] 준비 완료! 캡처를 시작하세요.\n")
+        print("[INFO] Ready! You can start capturing.\n")
 
         self._print_controls()
         self._main_loop()
 
     def _print_controls(self):
-        """조작법 출력"""
+        """Print key controls"""
         print("┌─────────────────────────────────────┐")
-        print("│           조작 키 안내               │")
+        print("│           Key Controls               │")
         print("├─────────────────────────────────────┤")
-        print("│  [S]     수동 캡처 (이미지 저장)     │")
-        print("│  [A]     자동 캡처 ON/OFF            │")
-        print("│  [R]     비디오 녹화 시작/중지        │")
-        print("│  [D]     깊이 뷰 ON/OFF              │")
-        print("│  [Q]     종료                        │")
+        print("│  [S]     Manual capture (save image) │")
+        print("│  [A]     Auto capture ON/OFF         │")
+        print("│  [R]     Video recording start/stop  │")
+        print("│  [D]     Depth view ON/OFF           │")
+        print("│  [Q]     Quit                        │")
         print("└─────────────────────────────────────┘")
         print()
 
     def _main_loop(self):
-        """메인 캡처 루프"""
+        """Main capture loop"""
         try:
             while True:
-                # 프레임 획득
+                # Acquire frames
                 color_image, depth_image, depth_frame = get_frames(
                     self.pipeline, self.align
                 )
@@ -113,40 +113,40 @@ class RealsenseCapture:
                 if color_image is None:
                     continue
 
-                # 자동 캡처 처리
+                # Auto capture
                 if self.is_auto_capture:
                     now = time.time()
                     if now - self.last_auto_time >= self.auto_interval:
                         self._save_current(color_image, depth_image)
                         self.last_auto_time = now
 
-                # 비디오 녹화 처리
+                # Video recording
                 if self.is_recording and self.video_writer is not None:
                     self.video_writer.write(color_image)
 
-                # 디스플레이 프레임 준비
+                # Prepare display frame
                 display_frame = self._build_display(
                     color_image, depth_image, depth_frame
                 )
 
-                # 화면 출력
+                # Show frame
                 cv2.imshow(DISPLAY["window_name"], display_frame)
 
-                # 키 입력 처리
+                # Handle key input
                 key = cv2.waitKey(1) & 0xFF
                 if not self._handle_key(key, color_image, depth_image):
                     break
 
         except KeyboardInterrupt:
-            print("\n[INFO] Ctrl+C 감지 - 종료합니다.")
+            print("\n[INFO] Ctrl+C detected - shutting down.")
         finally:
             self._cleanup()
 
     def _build_display(self, color_image, depth_image, depth_frame):
-        """디스플레이 프레임 구성"""
+        """Build display frame"""
         display = color_image.copy()
 
-        # 중앙 십자선 + 깊이 표시
+        # Center crosshair + depth display
         h, w = display.shape[:2]
         cx, cy = w // 2, h // 2
         cv2.drawMarker(
@@ -155,7 +155,7 @@ class RealsenseCapture:
         )
         center_dist = get_depth_distance(depth_frame, cx, cy)
 
-        # 정보 오버레이
+        # Info overlay
         elapsed = time.time() - self.start_time
         info = {
             "Captured": f"{self.capture_count}",
@@ -165,17 +165,17 @@ class RealsenseCapture:
         }
         display = draw_info_overlay(display, info, self.is_recording)
 
-        # 깊이 뷰 결합
+        # Depth view overlay
         if self.show_depth:
             depth_colormap = apply_depth_colormap(depth_image, depth_frame)
-            # 깊이 뷰를 컬러 뷰의 1/3 크기로 축소하여 우측 하단에 표시
+            # Resize depth view to 1/3 of color view and place at bottom-right
             small_h, small_w = h // 3, w // 3
             depth_small = cv2.resize(depth_colormap, (small_w, small_h))
 
-            # 테두리 추가
+            # Add border
             cv2.rectangle(depth_small, (0, 0), (small_w - 1, small_h - 1), (255, 255, 255), 1)
 
-            # 우측 하단에 오버레이
+            # Overlay at bottom-right
             y1 = h - small_h - 10
             x1 = w - small_w - 10
             display[y1:y1 + small_h, x1:x1 + small_w] = depth_small
@@ -184,8 +184,8 @@ class RealsenseCapture:
 
     def _handle_key(self, key, color_image, depth_image):
         """
-        키 입력 처리
-        Returns: False면 루프 종료
+        Handle key input
+        Returns: False to exit loop
         """
         if key == ord('q') or key == ord('Q'):
             return False
@@ -197,7 +197,7 @@ class RealsenseCapture:
             self.is_auto_capture = not self.is_auto_capture
             self.last_auto_time = time.time()
             state = "ON" if self.is_auto_capture else "OFF"
-            print(f"[AUTO] 자동 캡처 {state} (간격: {self.auto_interval}s)")
+            print(f"[AUTO] Auto capture {state} (interval: {self.auto_interval}s)")
 
         elif key == ord('r') or key == ord('R'):
             self._toggle_recording(color_image)
@@ -205,20 +205,20 @@ class RealsenseCapture:
         elif key == ord('d') or key == ord('D'):
             self.show_depth = not self.show_depth
             state = "ON" if self.show_depth else "OFF"
-            print(f"[DEPTH] 깊이 뷰 {state}")
+            print(f"[DEPTH] Depth view {state}")
 
         return True
 
     def _save_current(self, color_image, depth_image):
-        """현재 프레임 저장"""
+        """Save current frame"""
         filename = save_image(color_image, depth_image, self.prefix)
         self.capture_count += 1
         print(f"[SAVE] #{self.capture_count:04d} → {filename}")
 
     def _toggle_recording(self, color_image):
-        """비디오 녹화 토글"""
+        """Toggle video recording"""
         if not self.is_recording:
-            # 녹화 시작
+            # Start recording
             timestamp = int(time.time())
             video_path = os.path.join(
                 PATHS["videos"],
@@ -230,56 +230,56 @@ class RealsenseCapture:
                 video_path, fourcc, CAPTURE["video_fps"], (w, h)
             )
             self.is_recording = True
-            print(f"[REC] 녹화 시작 → {video_path}")
+            print(f"[REC] Recording started → {video_path}")
         else:
-            # 녹화 중지
+            # Stop recording
             self.is_recording = False
             if self.video_writer:
                 self.video_writer.release()
                 self.video_writer = None
-            print("[REC] 녹화 중지")
+            print("[REC] Recording stopped")
 
     def _cleanup(self):
-        """리소스 정리"""
-        print("\n[INFO] 정리 중...")
+        """Release resources"""
+        print("\n[INFO] Cleaning up...")
 
         if self.is_recording and self.video_writer:
             self.video_writer.release()
-            print("[INFO] 비디오 저장 완료")
+            print("[INFO] Video saved")
 
         if self.pipeline:
             self.pipeline.stop()
-            print("[INFO] RealSense 파이프라인 종료")
+            print("[INFO] RealSense pipeline stopped")
 
         cv2.destroyAllWindows()
 
-        print(f"\n[결과] 총 {self.capture_count}장의 이미지를 캡처했습니다.")
-        print(f"  → 이미지: {PATHS['images']}")
-        print(f"  → 깊이:   {PATHS['depth']}")
-        print(f"  → 비디오: {PATHS['videos']}")
+        print(f"\n[RESULT] Captured {self.capture_count} image(s) total.")
+        print(f"  → Images: {PATHS['images']}")
+        print(f"  → Depth:  {PATHS['depth']}")
+        print(f"  → Videos: {PATHS['videos']}")
         print()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="RealSense D435i YOLO 학습 데이터 캡처 도구",
+        description="RealSense D435i YOLO training data capture tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--no-depth", action="store_true",
-        help="깊이 이미지 저장 비활성화",
+        help="Disable depth image saving",
     )
     parser.add_argument(
         "--auto", type=float, default=None,
-        help=f"자동 캡처 간격 (초). 기본값: {CAPTURE['auto_interval']}",
+        help=f"Auto capture interval (seconds). Default: {CAPTURE['auto_interval']}",
     )
     parser.add_argument(
         "--prefix", type=str, default="img",
-        help="저장 파일명 접두사. 기본값: img",
+        help="Filename prefix. Default: img",
     )
     parser.add_argument(
         "--resolution", type=int, choices=[640, 1280, 1920], default=None,
-        help="캡처 해상도 (너비). 기본값: config.py 설정 사용",
+        help="Capture resolution (width). Default: uses config.py setting",
     )
     return parser.parse_args()
 
@@ -287,7 +287,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    # 해상도 오버라이드
+    # Resolution override
     if args.resolution:
         if args.resolution == 640:
             CAMERA["color_width"], CAMERA["color_height"] = 640, 480
@@ -297,7 +297,7 @@ if __name__ == "__main__":
             CAMERA["depth_width"], CAMERA["depth_height"] = 1280, 720
         elif args.resolution == 1920:
             CAMERA["color_width"], CAMERA["color_height"] = 1920, 1080
-            # D435i 깊이 센서의 최대 지원 해상도는 1280x720
+            # D435i depth sensor maximum supported resolution is 1280x720
             CAMERA["depth_width"], CAMERA["depth_height"] = 1280, 720
 
     capture = RealsenseCapture(args)
