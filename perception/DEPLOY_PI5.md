@@ -19,7 +19,7 @@ Pi에 배포해야 하는 것은 크게 두 가지:
 ## 1단계: Pi 기본 환경 설정
 
 ### OS
-- **Raspberry Pi OS 64-bit (Bookworm)** 권장
+- **Ubuntu 24.04 LTS (Noble Numbat) 64-bit** for Raspberry Pi 5
 - 반드시 64-bit (aarch64) 사용
 
 ### 시스템 패키지 설치
@@ -55,9 +55,19 @@ sudo apt install -y libusb-1.0-0-dev
 Pi5 4GB 모델은 빌드 중 메모리 부족할 수 있으므로 스왑을 늘린다 (8GB 모델은 생략 가능):
 
 ```bash
-sudo dphys-swapfile swapoff
-sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile
-sudo dphys-swapfile setup && sudo dphys-swapfile swapon
+# Ubuntu 24.04는 dphys-swapfile 대신 swapfile 직접 관리
+# 기존 스왑 비활성화
+sudo swapoff -a
+
+# 2GB 스왑 파일 생성
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# 재부팅 후에도 유지
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
 free -h  # 확인
 ```
 
@@ -245,8 +255,8 @@ pip install ultralytics    # YOLO (detect 모드 사용 시만)
 > find /usr/local/lib -name "pyrealsense2*" 2>/dev/null
 >
 > # venv에 링크 (Python 버전에 맞게 수정)
-> ln -s /usr/local/lib/python3.11/dist-packages/pyrealsense2* \
->       ~/perception/venv/lib/python3.11/site-packages/
+> ln -s /usr/local/lib/python3.12/dist-packages/pyrealsense2* \
+>       ~/perception/venv/lib/python3.12/site-packages/
 > ```
 
 ### 3-3. 경로 수정 (필수)
@@ -358,14 +368,14 @@ echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:~/ORB_SLAM3/lib:~/ORB_SLAM3/Thirdp
 ```bash
 # 4.4 이상이어야 ORB-SLAM3 빌드 가능
 pkg-config --modversion opencv4
-# Bookworm은 4.6+ 포함되어 있으므로 보통 문제 없음
+# Ubuntu 24.04는 OpenCV 4.6+ 포함되어 있으므로 보통 문제 없음
 ```
 
 ---
 
 ## 요약 체크리스트
 
-- [ ] Pi OS 64-bit 설치
+- [ ] Ubuntu 24.04 64-bit 설치
 - [ ] 시스템 패키지 설치 (cmake, opencv, eigen3, boost 등)
 - [ ] 스왑 2GB로 확장 (4GB 모델만)
 - [ ] librealsense 소스 빌드 + Python 바인딩
