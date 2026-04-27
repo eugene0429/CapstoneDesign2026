@@ -13,11 +13,13 @@ Run directly:
 """
 from __future__ import annotations
 
+import random
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 SCENARIO_RE = re.compile(r"^scenario_(\d+)_")
+SplitDict = Dict[str, List[Tuple[Path, Path]]]
 
 
 def discover_scenarios(dataset_root: Path) -> List[Tuple[str, Path, Path]]:
@@ -60,3 +62,36 @@ def pair_images_with_labels(
             continue
         pairs.append((img, lab))
     return pairs
+
+
+def stratified_split(
+    pairs_by_scenario: Dict[str, List[Tuple[Path, Path]]],
+    ratios: Sequence[float] = (0.8, 0.1, 0.1),
+    seed: int = 42,
+) -> SplitDict:
+    """Per-scenario shuffle then split into train/val/test by `ratios`.
+
+    The last bucket absorbs any rounding remainder so no pair is dropped.
+    """
+    if abs(sum(ratios) - 1.0) > 1e-6:
+        raise ValueError(f"ratios must sum to 1.0, got {ratios}")
+    rng = random.Random(seed)
+    out: SplitDict = {"train": [], "val": [], "test": []}
+    keys = ("train", "val", "test")
+    for sid in sorted(pairs_by_scenario):
+        items = list(pairs_by_scenario[sid])
+        rng.shuffle(items)
+        n = len(items)
+        n_train = int(n * ratios[0])
+        n_val   = int(n * ratios[1])
+        # ensure val/test each get at least 1 when enough items exist,
+        # so small scenarios still contribute to every split
+        if n >= 3 and n_val == 0:
+            n_val = 1
+        if n >= 3 and n - n_train - n_val < 1:
+            n_train = max(1, n - n_val - 1)
+        # test takes the remainder so we never drop pairs
+        cuts = [0, n_train, n_train + n_val, n]
+        for i, key in enumerate(keys):
+            out[key].extend(items[cuts[i]: cuts[i + 1]])
+    return out

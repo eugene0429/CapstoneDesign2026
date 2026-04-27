@@ -87,5 +87,59 @@ class TestPairing(unittest.TestCase):
             self.assertEqual(pairs[0][0].stem, "a")
 
 
+from perception.training.prepare_dataset import stratified_split
+
+
+class TestStratifiedSplit(unittest.TestCase):
+    def _fake_pairs(self, n: int, prefix: str) -> list:
+        return [(Path(f"/tmp/{prefix}_{i}.jpg"), Path(f"/tmp/{prefix}_{i}.txt"))
+                for i in range(n)]
+
+    def test_split_sizes_per_scenario_match_ratios(self):
+        pairs_by_scenario = {
+            "01": self._fake_pairs(100, "s01"),
+            "02": self._fake_pairs(100, "s02"),
+        }
+        splits = stratified_split(pairs_by_scenario, ratios=(0.8, 0.1, 0.1), seed=42)
+        # 100 * (0.8, 0.1, 0.1) = (80, 10, 10) per scenario, 200 total split as 160/20/20
+        self.assertEqual(len(splits["train"]), 160)
+        self.assertEqual(len(splits["val"]), 20)
+        self.assertEqual(len(splits["test"]), 20)
+
+    def test_split_handles_uneven_counts_without_dropping(self):
+        # 7 items, 0.8/0.1/0.1 -> 5/1/1 (with last bucket taking remainder)
+        pairs_by_scenario = {"01": self._fake_pairs(7, "s01")}
+        splits = stratified_split(pairs_by_scenario, ratios=(0.8, 0.1, 0.1), seed=42)
+        total = sum(len(splits[k]) for k in ("train", "val", "test"))
+        self.assertEqual(total, 7)
+        self.assertGreaterEqual(len(splits["train"]), 5)
+        self.assertGreaterEqual(len(splits["val"]), 1)
+        self.assertGreaterEqual(len(splits["test"]), 1)
+
+    def test_split_is_deterministic_with_seed(self):
+        pairs_by_scenario = {"01": self._fake_pairs(50, "s01")}
+        a = stratified_split(pairs_by_scenario, seed=42)
+        b = stratified_split(pairs_by_scenario, seed=42)
+        self.assertEqual([p[0].name for p in a["train"]],
+                         [p[0].name for p in b["train"]])
+
+    def test_split_changes_with_different_seed(self):
+        pairs_by_scenario = {"01": self._fake_pairs(50, "s01")}
+        a = stratified_split(pairs_by_scenario, seed=42)
+        b = stratified_split(pairs_by_scenario, seed=7)
+        self.assertNotEqual([p[0].name for p in a["train"]],
+                            [p[0].name for p in b["train"]])
+
+    def test_no_overlap_between_splits(self):
+        pairs_by_scenario = {"01": self._fake_pairs(100, "s01")}
+        splits = stratified_split(pairs_by_scenario, seed=42)
+        train_set = {p[0].name for p in splits["train"]}
+        val_set   = {p[0].name for p in splits["val"]}
+        test_set  = {p[0].name for p in splits["test"]}
+        self.assertEqual(len(train_set & val_set), 0)
+        self.assertEqual(len(train_set & test_set), 0)
+        self.assertEqual(len(val_set  & test_set), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
