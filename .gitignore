@@ -17,6 +17,12 @@ build/
 .idea/
 *.swp
 venv/
+.venv/
 
 # Data
 perception/dataset/
+
+# ML weights (managed separately, e.g. git-lfs or external storage)
+*.pt
+*.onnx
+*.engine
