@@ -9,9 +9,13 @@
 
 ## 1. Goal
 
-Expand the training split on disk by ×5 via offline augmentation (710 → 3550
-images) so the user has a visibly larger train set, while preserving val/test
-integrity for honest evaluation.
+Expand the training split on disk by generating 5 augmented copies per
+original image (`--multiplier 5`, default), preserving the originals → train/
+goes from 710 to 4260 image files (710 originals + 3550 augmented). Val/test
+remain untouched for honest evaluation.
+
+Multiplier semantics: `--multiplier N` writes N augmented copies per original.
+N=0 disables augmentation; N=1 doubles the train set; N=5 makes it 6×.
 
 Non-goals:
 - Augmenting val/test (would inflate metrics)
