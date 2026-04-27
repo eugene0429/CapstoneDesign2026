@@ -19,8 +19,12 @@ import cv2
 import os
 import psutil
 
-# ORB-SLAM3 path
-ORBSLAM3_DIR = "/home/sim2real1/WALJU/deps/ORB_SLAM3"
+# ORB-SLAM3 path — auto-detect based on platform
+import platform
+if platform.machine().startswith("aarch") or os.path.exists("/home/team1/ORB_SLAM3"):
+    ORBSLAM3_DIR = "/home/team1/ORB_SLAM3"
+else:
+    ORBSLAM3_DIR = "/home/sim2real1/WALJU/deps/ORB_SLAM3"
 
 BINARY_IMU    = os.path.join(ORBSLAM3_DIR, "Examples/RGB-D-Inertial/rgbd_inertial_realsense_D435i")
 BINARY_NO_IMU = os.path.join(ORBSLAM3_DIR, "Examples/RGB-D/rgbd_realsense_D435i")
@@ -39,16 +43,57 @@ STATE_NAMES = {-1: "NOT_READY", 0: "NO_IMAGE", 1: "INIT", 2: "OK", 3: "RECENTLY_
 # 1. Read actual camera calibration
 # ──────────────────────────────────────────────
 
-def get_camera_calibration():
+_CALIB_CACHE_PATH = "/tmp/orbslam_calib_cache.npz"
+
+
+def _flush_realsense():
+    """Open and close the camera from Python to flush dirty USB state."""
+    try:
+        import pyrealsense2 as rs
+        pipe = rs.pipeline()
+        cfg = rs.config()
+        cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
+        cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
+        pipe.start(cfg)
+        for _ in range(10):
+            pipe.wait_for_frames(timeout_ms=5000)
+        pipe.stop()
+        del pipe
+        time.sleep(2.0)
+    except Exception:
+        time.sleep(2.0)
+    return False
+
+
+def _load_cached_calibration():
+    """Load cached calibration if available."""
+    try:
+        data = np.load(_CALIB_CACHE_PATH, allow_pickle=True)
+        calib = data["calib"].item()
+        return calib
+    except Exception:
+        return None
+
+
+def _save_calibration_cache(calib):
+    """Save calibration to cache file."""
+    try:
+        np.savez(_CALIB_CACHE_PATH, calib=calib)
+    except Exception:
+        pass
+
+
+def get_camera_calibration(width=640, height=480, fps=30, use_imu=True):
     """Read actual D435i calibration via pyrealsense2."""
     try:
         import pyrealsense2 as rs
         pipeline = rs.pipeline()
         config = rs.config()
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        config.enable_stream(rs.stream.accel)
-        config.enable_stream(rs.stream.gyro)
+        config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
+        config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
+        if use_imu:
+            config.enable_stream(rs.stream.accel)
+            config.enable_stream(rs.stream.gyro)
 
         profile = pipeline.start(config)
 
@@ -56,13 +101,16 @@ def get_camera_calibration():
         color_prof = profile.get_stream(rs.stream.color).as_video_stream_profile()
         ci = color_prof.get_intrinsics()
 
-        accel_prof = profile.get_stream(rs.stream.accel).as_motion_stream_profile()
-        extr = accel_prof.get_extrinsics_to(color_prof)  # accel → color
-        R = np.array(extr.rotation).reshape(3, 3)
-        t = np.array(extr.translation)
+        R, t = None, None
+        if use_imu:
+            accel_prof = profile.get_stream(rs.stream.accel).as_motion_stream_profile()
+            extr = accel_prof.get_extrinsics_to(color_prof)  # accel → color
+            R = np.array(extr.rotation).reshape(3, 3)
+            t = np.array(extr.translation)
 
         pipeline.stop()
-        time.sleep(2.0)  # Wait for camera USB release (before C++ binary opens it)
+        del pipeline
+        time.sleep(4.0)  # Wait for camera USB release (before C++ binary opens it)
 
         calib = {
             "fx": ci.fx, "fy": ci.fy,
@@ -72,12 +120,10 @@ def get_camera_calibration():
             "width": ci.width, "height": ci.height,
             "R_imu_cam": R, "t_imu_cam": t,
         }
-        print(f"[ORBSLAM] Calibration acquired:")
-        print(f"  fx={ci.fx:.3f}  fy={ci.fy:.3f}  cx={ci.ppx:.3f}  cy={ci.ppy:.3f}")
         return calib
 
     except Exception as e:
-        print(f"[ORBSLAM] Failed to read calibration: {e}  →  using defaults")
+        print(f"[ORBSLAM] Calibration failed: {e}, using defaults")
         return None
 
 
@@ -105,27 +151,28 @@ def build_yaml(calib, base_yaml_path, out_path):
     # IMU→Camera extrinsics (T_b_c1: body=IMU, c1=color camera)
     R = calib["R_imu_cam"]
     t = calib["t_imu_cam"]
-    T_str = (
-        "IMU.T_b_c1: !!opencv-matrix\n"
-        "   rows: 4\n"
-        "   cols: 4\n"
-        "   dt: f\n"
-        f"   data: [{R[0,0]:.6f}, {R[0,1]:.6f}, {R[0,2]:.6f}, {t[0]:.6f},\n"
-        f"         {R[1,0]:.6f}, {R[1,1]:.6f}, {R[1,2]:.6f}, {t[1]:.6f},\n"
-        f"         {R[2,0]:.6f}, {R[2,1]:.6f}, {R[2,2]:.6f}, {t[2]:.6f},\n"
-        f"         0.0, 0.0, 0.0, 1.0]"
-    )
-    import re
-    content = re.sub(
-        r"IMU\.T_b_c1:.*?(?=\n\n|\n#|\nIMU\.Insert)",
-        T_str,
-        content,
-        flags=re.DOTALL,
-    )
+    if R is not None and t is not None:
+        T_str = (
+            "IMU.T_b_c1: !!opencv-matrix\n"
+            "   rows: 4\n"
+            "   cols: 4\n"
+            "   dt: f\n"
+            f"   data: [{R[0,0]:.6f}, {R[0,1]:.6f}, {R[0,2]:.6f}, {t[0]:.6f},\n"
+            f"         {R[1,0]:.6f}, {R[1,1]:.6f}, {R[1,2]:.6f}, {t[1]:.6f},\n"
+            f"         {R[2,0]:.6f}, {R[2,1]:.6f}, {R[2,2]:.6f}, {t[2]:.6f},\n"
+            f"         0.0, 0.0, 0.0, 1.0]"
+        )
+        import re
+        content = re.sub(
+            r"IMU\.T_b_c1:.*?(?=\n\n|\n#|\nIMU\.Insert)",
+            T_str,
+            content,
+            flags=re.DOTALL,
+        )
 
     with open(out_path, "w") as f:
         f.write(content)
-    print(f"[ORBSLAM] Calibration yaml saved: {out_path}")
+    pass  # yaml saved silently
 
 
 # ──────────────────────────────────────────────
@@ -334,7 +381,7 @@ def _pose_reader(proc, pose_buf, lock, stop_evt):
                 pass
 
 
-def run_orbslam_headless(use_imu=True, pi_mode=False):
+def run_orbslam_headless(use_imu=True, pi_mode=False, _max_retries=3):
     """Headless ORB-SLAM3 runner — prints world-frame (x, y, theta) to terminal.
 
     World coordinate convention (camera starts at origin):
@@ -342,6 +389,17 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
       - world Y = camera -X (left)
       - theta   = yaw angle (deg), CCW positive viewed from above
     """
+    for attempt in range(_max_retries):
+        _flush_realsense()
+        rc = _run_orbslam_headless_once(use_imu=use_imu, pi_mode=pi_mode)
+        if rc is None or rc == 0:
+            return  # Normal exit (Ctrl+C or clean shutdown)
+        print(f"\n[ORBSLAM] Crash (rc={rc}), retrying ({attempt+1}/{_max_retries})...")
+    print(f"[ORBSLAM] Failed after {_max_retries} attempts")
+
+
+def _run_orbslam_headless_once(use_imu=True, pi_mode=False):
+    """Single attempt of headless ORB-SLAM3. Returns exit code (None=Ctrl+C)."""
     import math
     from scipy.spatial.transform import Rotation
 
@@ -353,11 +411,15 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
     for path, name in [(binary, "binary"), (VOCAB, "Vocabulary"), (base_cfg, "base yaml")]:
         if not os.path.exists(path):
             print(f"[ORBSLAM] {name} not found: {path}")
-            return
+            return 0
 
-    print(f"[ORBSLAM] Mode: {mode_str}  (headless)")
-
-    calib = get_camera_calibration()
+    # Use cached calibration to avoid opening camera twice (prevents USB contention)
+    calib = _load_cached_calibration()
+    if not calib:
+        cal_w, cal_h, cal_fps = (640, 480, 15) if pi_mode else (640, 480, 30)
+        calib = get_camera_calibration(width=cal_w, height=cal_h, fps=cal_fps, use_imu=use_imu)
+        if calib:
+            _save_calibration_cache(calib)
     tmp_dir = tempfile.mkdtemp(prefix="orbslam_")
     config_path = os.path.join(tmp_dir, "RealSense_D435i_calib.yaml")
     if calib:
@@ -367,16 +429,23 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
 
     env = os.environ.copy()
     env["ORBSLAM_NO_VIEWER"] = "1"
-    rs_lib = "/usr/lib/x86_64-linux-gnu"
+    orbslam_libs = [
+        os.path.join(ORBSLAM3_DIR, "lib"),
+        os.path.join(ORBSLAM3_DIR, "Thirdparty/DBoW2/lib"),
+        os.path.join(ORBSLAM3_DIR, "Thirdparty/g2o/lib"),
+    ]
     existing = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{rs_lib}:{existing}" if existing else rs_lib
+    env["LD_LIBRARY_PATH"] = ":".join(orbslam_libs + ([existing] if existing else []))
+
+    stdout_path = os.path.join(tmp_dir, "stdout.log")
+    stderr_path = os.path.join(tmp_dir, "stderr.log")
+    stdout_f = open(stdout_path, "w")
+    stderr_f = open(stderr_path, "w")
 
     proc = subprocess.Popen(
         [binary, VOCAB, config_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
+        stdout=stdout_f,
+        stderr=stderr_f,
         env=env,
     )
 
@@ -385,22 +454,50 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
     stop_evt = threading.Event()
     last_state = [-1]
 
-    def _stderr_collector(p):
-        for line in p.stderr:
-            line = line.rstrip()
-            if line.startswith("STATE:"):
-                try:
-                    last_state[0] = int(line.split(":")[1].strip())
-                except ValueError:
-                    pass
-            else:
-                print(f"[ORBSLAM3] {line}", flush=True)
+    def _file_pose_reader(path, pose_buf, lock, stop_evt):
+        """Tail the stdout log file for POSE lines."""
+        with open(path, "r") as f:
+            while not stop_evt.is_set():
+                line = f.readline()
+                if not line:
+                    time.sleep(0.01)
+                    continue
+                line = line.strip()
+                if line.startswith("POSE:"):
+                    try:
+                        vals = list(map(float, line.split()[1:]))
+                        if len(vals) == 7:
+                            with lock:
+                                pose_buf.append(np.array(vals))
+                    except ValueError:
+                        pass
 
-    threading.Thread(target=_pose_reader, args=(proc, pose_buf, lock, stop_evt), daemon=True).start()
-    threading.Thread(target=_stderr_collector, args=(proc,), daemon=False).start()
+    # C++ stderr lines to suppress (warnings, sensor dumps, verbose info)
+    _STDERR_SUPPRESS = (
+        "optional parameter", "not found", "Sensor supports",
+        "Description", "Current Value", "is not supported",
+        "Discarding", "dropped frs", "Fail to track",
+    )
 
-    print("[ORBSLAM] Headless mode — world-frame (x, y, theta) output")
-    print("[ORBSLAM] Press Ctrl+C to stop")
+    def _file_stderr_reader(path, stop_evt):
+        """Tail the stderr log file for STATE lines only."""
+        with open(path, "r") as f:
+            while not stop_evt.is_set():
+                line = f.readline()
+                if not line:
+                    time.sleep(0.05)
+                    continue
+                line = line.rstrip()
+                if line.startswith("STATE:"):
+                    try:
+                        last_state[0] = int(line.split(":")[1].strip())
+                    except ValueError:
+                        pass
+
+    threading.Thread(target=_file_pose_reader, args=(stdout_path, pose_buf, lock, stop_evt), daemon=True).start()
+    threading.Thread(target=_file_stderr_reader, args=(stderr_path, stop_evt), daemon=True).start()
+
+    print(f"[ORBSLAM] {mode_str} (headless) — Ctrl+C to stop")
     print(f"{'state':>8s}  {'x_m':>8s}  {'y_m':>8s}  {'theta_deg':>10s}  {'fps':>5s}")
 
     positions = []
@@ -420,7 +517,10 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
                 # Camera frame → world frame
                 cam_pos = p[:3]
                 quat = p[3:7]  # [qx, qy, qz, qw] — scipy uses [x,y,z,w]
-                R = Rotation.from_quat(quat).as_matrix()
+                try:
+                    R = Rotation.from_quat(quat).as_matrix()
+                except Exception:
+                    continue
 
                 world_x = cam_pos[2]       # camera Z = forward
                 world_y = -cam_pos[0]      # camera -X = left
@@ -444,15 +544,25 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
             if not new_poses:
                 time.sleep(0.01)
 
+        # Process exited on its own
+        rc = proc.returncode
+
     except KeyboardInterrupt:
         print("\n[ORBSLAM] Stopped (Ctrl+C)")
+        rc = None  # Signal normal exit to caller
+    except Exception as e:
+        print(f"\n[ORBSLAM] Python exception: {e}")
+        rc = -1
     finally:
         stop_evt.set()
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        stdout_f.close()
+        stderr_f.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if os.path.exists(FRAME_PATH):
             os.remove(FRAME_PATH)
@@ -460,8 +570,9 @@ def run_orbslam_headless(use_imu=True, pi_mode=False):
         if positions:
             arr = np.array([p[:3] for p in positions])
             dist = float(np.sum(np.linalg.norm(np.diff(arr, axis=0), axis=1)))
-            print(f"\n[ORBSLAM] Results: {len(positions)} poses, {dist:.3f}m traveled")
-        print("[ORBSLAM] Shutdown complete")
+            print(f"\n[ORBSLAM] {len(positions)} poses, {dist:.3f}m traveled")
+
+    return rc
 
 
 def run_orbslam(use_imu=True, pi_mode=False):
@@ -476,25 +587,26 @@ def run_orbslam(use_imu=True, pi_mode=False):
             print(f"[ORBSLAM] {name} not found: {path}")
             return
 
-    print(f"[ORBSLAM] Mode: {mode_str}")
-
     # Generate yaml with actual calibration
-    calib = get_camera_calibration()
+    cal_w, cal_h, cal_fps = (640, 480, 15) if pi_mode else (640, 480, 30)
+    calib = get_camera_calibration(width=cal_w, height=cal_h, fps=cal_fps, use_imu=use_imu)
     tmp_dir = tempfile.mkdtemp(prefix="orbslam_")
     config_path = os.path.join(tmp_dir, "RealSense_D435i_calib.yaml")
     if calib:
         build_yaml(calib, base_cfg, config_path)
     else:
         shutil.copy(base_cfg, config_path)
-        print(f"[ORBSLAM] Using default yaml: {base_cfg}")
 
-    print(f"[ORBSLAM] Pangolin viewer will open in a separate window.")
-    print("[ORBSLAM] Press 'q' in the Python window to quit.\n")
+    print(f"[ORBSLAM] {mode_str} — 'q' to quit")
 
     env = os.environ.copy()
-    rs_lib = "/usr/lib/x86_64-linux-gnu"
+    orbslam_libs = [
+        os.path.join(ORBSLAM3_DIR, "lib"),
+        os.path.join(ORBSLAM3_DIR, "Thirdparty/DBoW2/lib"),
+        os.path.join(ORBSLAM3_DIR, "Thirdparty/g2o/lib"),
+    ]
     existing = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{rs_lib}:{existing}" if existing else rs_lib
+    env["LD_LIBRARY_PATH"] = ":".join(orbslam_libs + ([existing] if existing else []))
 
     proc = subprocess.Popen(
         [binary, VOCAB, config_path],
@@ -519,8 +631,6 @@ def run_orbslam(use_imu=True, pi_mode=False):
                     last_state[0] = int(line.split(":")[1].strip())
                 except ValueError:
                     pass
-            else:
-                print(f"[ORBSLAM3] {line}", flush=True)
 
     threading.Thread(target=_pose_reader,     args=(proc, pose_buf, lock, stop_evt), daemon=True).start()
     threading.Thread(target=_stderr_collector, args=(proc,), daemon=False).start()
@@ -534,8 +644,6 @@ def run_orbslam(use_imu=True, pi_mode=False):
     blank_cam  = np.zeros((480, 640, 3), dtype=np.uint8)
     cv2.putText(blank_cam, "Waiting for ORB-SLAM3 frames...",
                 (60, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 1)
-
-    print("[ORBSLAM] Starting monitoring window...")
 
     try:
         while proc.poll() is None:
@@ -571,12 +679,15 @@ def run_orbslam(use_imu=True, pi_mode=False):
 
             traj_resized = cv2.resize(traj_image, (480, 480))
             combined = np.hstack([cam_img, traj_resized])
-            cv2.imshow("ORB-SLAM3 Monitor", combined)
 
-            key = cv2.waitKey(33) & 0xFF
-            if key == ord('q'):
-                print("[ORBSLAM] User quit")
-                break
+            if os.environ.get("DISPLAY"):
+                cv2.imshow("ORB-SLAM3 Monitor", combined)
+                key = cv2.waitKey(33) & 0xFF
+                if key == ord('q'):
+                    print("[ORBSLAM] User quit")
+                    break
+            else:
+                time.sleep(0.033)
 
     except KeyboardInterrupt:
         print("\n[ORBSLAM] Stopped (Ctrl+C)")

@@ -270,8 +270,17 @@ class RealSenseCamera:
     def warmup(self, num_frames=30):
         """Wait for camera to stabilize"""
         print("[INFO] Warming up camera...")
-        for _ in range(num_frames):
-            self.pipeline.wait_for_frames()
+        for i in range(num_frames):
+            try:
+                self.pipeline.wait_for_frames(timeout_ms=10000)
+            except RuntimeError:
+                if i == 0:
+                    print("[WARN] First frame slow, retrying...")
+                    import time
+                    time.sleep(1)
+                    self.pipeline.wait_for_frames(timeout_ms=15000)
+                else:
+                    raise
         print("[INFO] Camera ready!")
 
 
