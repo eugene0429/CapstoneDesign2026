@@ -26,3 +26,9 @@ perception/dataset/
 *.pt
 *.onnx
 *.engine
+
+# Training (generated artifacts)
+perception/training/data/
+perception/training/runs/
+perception/training/dataset.yaml
+perception/training/weights/
