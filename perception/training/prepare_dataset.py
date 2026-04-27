@@ -137,6 +137,34 @@ def write_dataset_yaml(
     yaml_path.write_text("\n".join(lines) + "\n")
 
 
+def warn_on_nonzero_classes(pairs: List[Tuple[Path, Path]]) -> None:
+    """Print a warning for any label file containing a class id != 0.
+
+    Defensive check: train.py runs with single_cls=True, which would otherwise
+    silently treat e.g. a stray `2 ...` line as class 0. This makes typos
+    visible without aborting the run.
+    """
+    offenders: list[tuple[Path, set[str]]] = []
+    for _img, lab in pairs:
+        bad: set[str] = set()
+        for line in lab.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            cls = line.split(maxsplit=1)[0]
+            if cls != "0":
+                bad.add(cls)
+        if bad:
+            offenders.append((lab, bad))
+    if offenders:
+        print(f"[prepare] WARNING: {len(offenders)} label file(s) contain "
+              f"non-zero class ids (single_cls=True will collapse them):")
+        for lab, bad in offenders[:10]:
+            print(f"  - {lab} (classes: {sorted(bad)})")
+        if len(offenders) > 10:
+            print(f"  ... and {len(offenders) - 10} more")
+
+
 def prepare(
     dataset_root: Path,
     training_root: Path,
@@ -165,6 +193,9 @@ def prepare(
     pairs_by_scenario: Dict[str, List[Tuple[Path, Path]]] = {}
     for sid, imgs_dir, labels_dir in discover_scenarios(dataset_root):
         pairs_by_scenario[sid] = pair_images_with_labels(imgs_dir, labels_dir)
+
+    all_pairs = [p for ps in pairs_by_scenario.values() for p in ps]
+    warn_on_nonzero_classes(all_pairs)
 
     splits = stratified_split(pairs_by_scenario, seed=seed)
     build_symlink_tree(splits, data_root)

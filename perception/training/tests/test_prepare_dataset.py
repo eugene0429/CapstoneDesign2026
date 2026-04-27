@@ -250,5 +250,35 @@ class TestPrepareOrchestrator(unittest.TestCase):
             self.assertFalse(stale.exists())
 
 
+import io
+import contextlib
+
+from perception.training.prepare_dataset import warn_on_nonzero_classes
+
+
+class TestWarnOnNonzeroClasses(unittest.TestCase):
+    def test_warns_when_label_has_non_zero_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ok = root / "ok.txt"; ok.write_text("0 .5 .5 .1 .1")
+            bad = root / "bad.txt"; bad.write_text("2 .5 .5 .1 .1\n0 .3 .3 .1 .1")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                warn_on_nonzero_classes([(Path("dummy.jpg"), ok),
+                                         (Path("dummy.jpg"), bad)])
+            out = buf.getvalue()
+            self.assertIn("warning", out.lower())
+            self.assertIn("bad.txt", out)
+
+    def test_silent_when_all_labels_are_class_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ok = root / "ok.txt"; ok.write_text("0 .5 .5 .1 .1\n0 .3 .3 .1 .1")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                warn_on_nonzero_classes([(Path("dummy.jpg"), ok)])
+            self.assertEqual(buf.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
