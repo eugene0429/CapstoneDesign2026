@@ -114,6 +114,21 @@ class TestBuildTransform(unittest.TestCase):
             self.assertGreater(w, 0.0); self.assertLessEqual(w, 1.0)
             self.assertGreater(h, 0.0); self.assertLessEqual(h, 1.0)
 
+    def test_clips_bbox_with_floating_point_underflow(self):
+        # Real-data regression: some labels in the dataset compute y_min slightly
+        # below 0 due to rounding (e.g. cy=0.0146, h=0.0417 -> y_min=-0.006).
+        # With clip=True, BboxParams should clamp instead of raising.
+        t = build_transform()
+        img = np.full((480, 640, 3), 128, dtype=np.uint8)
+        bboxes = [(0.5242, 0.0146, 0.0484, 0.0417)]  # y_min ~= -0.006
+        class_labels = [0]
+        # Should not raise
+        out = t(image=img, bboxes=bboxes, class_labels=class_labels)
+        # Surviving bbox (if any) must be within unit range
+        for cx, cy, w, h in out["bboxes"]:
+            self.assertGreaterEqual(cy - h / 2, 0.0)
+            self.assertLessEqual(cy + h / 2, 1.0)
+
 
 import cv2 as _cv2
 
