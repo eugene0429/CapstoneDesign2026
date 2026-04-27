@@ -13,11 +13,13 @@ Run directly:
 """
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import List, Tuple
 
 import albumentations as A
 import cv2
+import numpy as np
 
 
 def _train_dirs(training_root: Path) -> Tuple[Path, Path]:
@@ -94,3 +96,65 @@ def build_transform() -> A.Compose:
             min_visibility=0.3,
         ),
     )
+
+
+def _read_label_yolo(lab_path: Path) -> Tuple[List[Tuple[float, float, float, float]], List[int]]:
+    """Parse a YOLO label file into (bboxes, class_labels)."""
+    bboxes: list[tuple[float, float, float, float]] = []
+    classes: list[int] = []
+    for line in lab_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        cls = int(parts[0])
+        cx, cy, w, h = (float(v) for v in parts[1:5])
+        bboxes.append((cx, cy, w, h))
+        classes.append(cls)
+    return bboxes, classes
+
+
+def _write_label_yolo(
+    lab_path: Path,
+    bboxes: List[Tuple[float, float, float, float]],
+    classes: List[int],
+) -> None:
+    if not bboxes:
+        lab_path.write_text("")
+        return
+    lines = [
+        f"{int(cls)} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
+        for cls, (cx, cy, w, h) in zip(classes, bboxes)
+    ]
+    lab_path.write_text("\n".join(lines) + "\n")
+
+
+def generate_one(
+    img_path: Path,
+    lab_path: Path,
+    out_img: Path,
+    out_lab: Path,
+    transform,
+    seed: int,
+) -> None:
+    """Apply `transform` to (img, label) and write to (out_img, out_lab).
+
+    Seeds both global RNGs and (when available) the albumentations Compose's
+    internal RNG via `set_random_seed`, so that subsequent runs with the same
+    seed produce byte-identical output.
+    """
+    np.random.seed(seed)
+    random.seed(seed)
+    # albumentations 2.x maintains its own RNG independent of numpy/random
+    # globals; seed it explicitly when the transform exposes the hook.
+    if hasattr(transform, "set_random_seed"):
+        transform.set_random_seed(seed)
+
+    image = cv2.imread(str(img_path))
+    if image is None:
+        raise IOError(f"could not read image: {img_path}")
+    bboxes, class_labels = _read_label_yolo(lab_path)
+
+    out = transform(image=image, bboxes=bboxes, class_labels=class_labels)
+    cv2.imwrite(str(out_img), out["image"])
+    _write_label_yolo(out_lab, list(out["bboxes"]), list(out["class_labels"]))

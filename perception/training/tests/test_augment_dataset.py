@@ -115,5 +115,78 @@ class TestBuildTransform(unittest.TestCase):
             self.assertGreater(h, 0.0); self.assertLessEqual(h, 1.0)
 
 
+import cv2 as _cv2
+
+from perception.training.augment_dataset import generate_one
+
+
+class TestGenerateOne(unittest.TestCase):
+    def _write_real_jpg(self, path: Path, h=480, w=640):
+        img = np.full((h, w, 3), 128, dtype=np.uint8)
+        _cv2.imwrite(str(path), img)
+
+    def test_writes_image_and_label_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_img = root / "src.jpg"; self._write_real_jpg(src_img)
+            src_lab = root / "src.txt"; src_lab.write_text("0 0.5 0.5 0.2 0.2\n")
+            out_img = root / "out.jpg"; out_lab = root / "out.txt"
+            t = build_transform()
+            generate_one(src_img, src_lab, out_img, out_lab, t, seed=42)
+            self.assertTrue(out_img.is_file())
+            self.assertTrue(out_lab.is_file())
+            written = _cv2.imread(str(out_img))
+            self.assertIsNotNone(written)
+            self.assertEqual(written.shape[2], 3)
+
+    def test_label_format_is_yolo_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_img = root / "src.jpg"; self._write_real_jpg(src_img)
+            src_lab = root / "src.txt"; src_lab.write_text("0 0.5 0.5 0.2 0.2\n")
+            out_img = root / "out.jpg"; out_lab = root / "out.txt"
+            t = build_transform()
+            generate_one(src_img, src_lab, out_img, out_lab, t, seed=42)
+            for line in out_lab.read_text().splitlines():
+                parts = line.split()
+                self.assertEqual(len(parts), 5)
+                self.assertEqual(parts[0], "0")
+                for v in parts[1:]:
+                    f = float(v)
+                    self.assertGreaterEqual(f, 0.0)
+                    self.assertLessEqual(f, 1.0)
+
+    def test_deterministic_with_same_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_img = root / "src.jpg"; self._write_real_jpg(src_img)
+            src_lab = root / "src.txt"; src_lab.write_text("0 0.5 0.5 0.2 0.2\n")
+            t = build_transform()
+            out_a = root / "a.jpg"; lab_a = root / "a.txt"
+            out_b = root / "b.jpg"; lab_b = root / "b.txt"
+            generate_one(src_img, src_lab, out_a, lab_a, t, seed=42)
+            generate_one(src_img, src_lab, out_b, lab_b, t, seed=42)
+            self.assertEqual(out_a.read_bytes(), out_b.read_bytes())
+            self.assertEqual(lab_a.read_text(), lab_b.read_text())
+
+    def test_empty_label_when_all_bboxes_dropped(self):
+        # Bbox at the extreme right edge with min_visibility=0.3 + heavy synthetic
+        # dropout via mocked transform that returns no bboxes.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_img = root / "src.jpg"; self._write_real_jpg(src_img)
+            src_lab = root / "src.txt"; src_lab.write_text("0 0.5 0.5 0.2 0.2\n")
+            out_img = root / "out.jpg"; out_lab = root / "out.txt"
+
+            class _DropAllTransform:
+                def __call__(self, image, bboxes, class_labels):
+                    return {"image": image, "bboxes": [], "class_labels": []}
+
+            generate_one(src_img, src_lab, out_img, out_lab,
+                         _DropAllTransform(), seed=42)
+            self.assertTrue(out_lab.is_file())
+            self.assertEqual(out_lab.stat().st_size, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
