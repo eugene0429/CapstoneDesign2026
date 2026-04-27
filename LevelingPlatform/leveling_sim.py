@@ -6,9 +6,12 @@ Geometry
 - 3 motors placed on a base circle (radius Rb) at 120 deg spacing.
 - Each motor rotates a crank arm of length La in the vertical plane
   that contains the base radius direction (axis of rotation is tangential).
-- A coupler rod of length Lc connects the crank tip to the top plate
-  via ball joints at both ends (so the coupler is an S-S link and only
-  its length constraint matters).
+- A coupler rod of length Lc connects the crank tip to the top plate.
+  * Crank-coupler joint at A: revolute (axis parallel to the motor axis,
+    i.e., tangential) -- no angular-range limit modeled here.
+  * Coupler-plate joint at P: spherical (RC-style ball joint) -- the rod
+    can tilt away from the bracket axis by at most BALL_MAX_DEG.
+  This is a 3-RRS parallel mechanism.
 - The top plate has 3 attachment points on a circle of radius Rp, at
   the same 120 deg angles as the base (in the plate body frame).
 
@@ -16,15 +19,22 @@ Given a desired platform orientation (unit normal vector n) and a
 commanded center height h, this script solves the inverse kinematics
 for the three motor angles and renders the mechanism in 3D.
 
+Motor angle convention
+----------------------
+theta = 0 corresponds to the home pose: crank points radially inward
+(horizontal) and the coupler is vertical. Positive theta rotates the crank
+tip upward. With this convention:
+    A_i = B_i - La * (cos(theta) r_hat + sin(theta) z_hat)
+
 Closed-form IK per leg
 ----------------------
     d_i = P_i - B_i
     u   = d_i . r_hat_i        (radial component)
     v   = d_i_z                (vertical component)
     k   = (|d_i|^2 + La^2 - Lc^2) / (2 La)
-    u cos th + v sin th = k
- => th_i = atan2(v, u) - acos( k / sqrt(u^2 + v^2) )
-    (the '-' branch picks the "elbow-down / knee-out" assembly)
+    u cos th + v sin th = -k
+ => th_i = atan2(v, u) - acos( -k / sqrt(u^2 + v^2) )
+    (the '-' branch picks the "knee-out" assembly so theta = 0 at home)
 
 Run
 ---
@@ -53,8 +63,46 @@ PHI = np.deg2rad([0.0, 120.0, 240.0])   # motor angular positions
 MOTOR_STEPS = 4096
 MOTOR_STEP_RAD = 2.0 * np.pi / MOTOR_STEPS
 
+# RC ball joint (only at the plate end P): the ball sits inside a bracket
+# cup; the rod can tilt away from the bracket's opening axis by at most
+# BALL_MAX_DEG before hitting the cup rim. Typical RC ball joints allow
+# ~25-35 deg.
+BALL_MAX_DEG = 30.0
+
+# P-side bracket opening axis (the only ball joint in the mechanism):
+# glued to the top plate with the cup facing down, so the opening axis in
+# the plate body frame is -z (when the plate is level the bracket looks
+# straight down). In world frame the rod direction *entering* the bracket
+# is -coupler_dir; comparing it to -R @ z_hat is the same as comparing
+# coupler_dir to +R @ z_hat (the plate's body +z in world coords).
+
 
 # -------------------- Math helpers --------------------
+def plate_center_offset(R):
+    """
+    3-RRS geometric constraint. Given a (yaw-free) platform rotation R,
+    return the plate-center horizontal offset (cx, cy) such that each
+    P_i = (cx, cy, *) + R @ p_body_i lies exactly in its motor's
+    r_hat-z vertical plane (i.e., P_i . t_hat_i = 0).
+
+    Derivation:
+        For each leg i let a_i = Rp * (R r_hat_i) . t_hat_i.
+        The 3 constraints become  -cx sin(phi_i) + cy cos(phi_i) = -a_i.
+        With PHI = {0, 120, 240}, sum(t_hat_i) = 0 and
+        sum(t_hat_i t_hat_i^T) = (3/2) I_2, which gives the closed form
+        below. Yaw-free R (as produced by rot_from_normal) guarantees
+        sum(a_i) = 0 so the 3 equations are consistent.
+    """
+    a = np.zeros(3)
+    for i, phi in enumerate(PHI):
+        r_hat = np.array([np.cos(phi), np.sin(phi), 0.0])
+        t_hat = np.array([-np.sin(phi), np.cos(phi), 0.0])
+        a[i] = Rp * float(np.dot(R @ r_hat, t_hat))
+    cx =  (2.0 / 3.0) * float(np.sum(np.sin(PHI) * a))
+    cy = -(2.0 / 3.0) * float(np.sum(np.cos(PHI) * a))
+    return cx, cy
+
+
 def rot_from_normal(n):
     """Rotation matrix mapping +z to the unit vector n (shortest arc)."""
     n = np.asarray(n, dtype=float)
@@ -74,22 +122,36 @@ def rot_from_normal(n):
     return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
 
 
-def inverse_kinematics(normal, height):
+def inverse_kinematics(normal, height, ball_max_deg=None):
     """
     Returns:
-        thetas : (3,) motor angles [rad] (NaN where unreachable)
-        A      : (3,3) crank tip positions
-        P      : (3,3) top joint positions
-        B      : (3,3) base pivot positions
-        ok     : bool - all legs reachable
+        thetas       : (3,) motor angles [rad] (NaN where unreachable)
+        A            : (3,3) crank tip positions
+        P            : (3,3) top joint positions
+        B            : (3,3) base pivot positions
+        ok           : bool - all legs reachable (length AND P-side ball
+                       joint limit)
+        ball_angles  : (3,) deflection angle [deg] of the coupler from the
+                       plate-side bracket axis, one per leg. NaN where the
+                       length constraint is infeasible. (The A-side joint
+                       is revolute, so no angular limit is modeled there.)
     """
+    if ball_max_deg is None:
+        ball_max_deg = BALL_MAX_DEG
+
     R = rot_from_normal(normal)
-    c = np.array([0.0, 0.0, height])
+    # 3-RRS constraint: plate center shifts horizontally with tilt so that
+    # each P_i stays in its motor's r_hat-z plane.
+    cx, cy = plate_center_offset(R)
+    c = np.array([cx, cy, height])
+    z_hat = np.array([0.0, 0.0, 1.0])
+    plate_up_world = R @ z_hat  # plate's body +z in world coords
 
     B = np.zeros((3, 3))
     P = np.zeros((3, 3))
     A = np.zeros((3, 3))
     thetas = np.full(3, np.nan)
+    ball_angles = np.full(3, np.nan)
     ok = True
 
     for i, phi in enumerate(PHI):
@@ -107,24 +169,37 @@ def inverse_kinematics(normal, height):
         if rho < 1e-12 or abs(k) > rho:
             ok = False
             continue
-        # '+ acos' branch -> home pose is theta = 180 deg
-        # (crank folded inward toward center, coupler vertical)
-        th = np.arctan2(v, u) + np.arccos(k / rho)
+        # '-' branch -> home pose is theta = 0
+        # (crank horizontal pointing inward, coupler vertical)
+        th = np.arctan2(v, u) - np.arccos(-k / rho)
+        # wrap to [-pi, pi]
+        th = (th + np.pi) % (2.0 * np.pi) - np.pi
         # Quantize to nearest encoder step (4096 counts / revolution)
         th = np.round(th / MOTOR_STEP_RAD) * MOTOR_STEP_RAD
         thetas[i] = th
-        A[i] = B[i] + La * (np.cos(th) * r_hat + np.sin(th) * np.array([0, 0, 1.0]))
+        A[i] = B[i] - La * (np.cos(th) * r_hat + np.sin(th) * z_hat)
 
-    return thetas, A, P, B, ok
+        # P-side ball joint deflection (A-side is revolute: no check).
+        coupler_dir = (P[i] - A[i]) / Lc
+        cos_P = float(np.clip(np.dot(coupler_dir, plate_up_world), -1.0, 1.0))
+        ang_P = np.rad2deg(np.arccos(cos_P))
+        ball_angles[i] = ang_P
+        if ang_P > ball_max_deg:
+            ok = False
+
+    return thetas, A, P, B, ok, ball_angles
 
 
 def _platform_joints(nx, ny, zc):
-    """Given pose state (nx, ny, zc), return P_i (3x3) and the normal n."""
+    """Given pose state (nx, ny, zc), return P_i (3x3) and the normal n.
+    The plate center is placed using the 3-RRS offset so every P_i lies in
+    its motor's r_hat-z plane."""
     s2 = nx * nx + ny * ny
     nz = np.sqrt(max(1.0 - s2, 0.0))
     n = np.array([nx, ny, nz])
     R = rot_from_normal(n)
-    c = np.array([0.0, 0.0, zc])
+    cx, cy = plate_center_offset(R)
+    c = np.array([cx, cy, zc])
     P = np.zeros((3, 3))
     for i, phi in enumerate(PHI):
         p_body = np.array([Rp * np.cos(phi), Rp * np.sin(phi), 0.0])
@@ -137,11 +212,11 @@ def forward_kinematics(thetas_q, guess_n, guess_zc):
     Given the three (quantized) motor angles, solve for the platform pose
     via Newton's method. Returns (n_actual, zc_actual, ok).
     """
-    # crank tips from quantized angles
+    # crank tips from quantized angles (motor-angle convention: theta=0 at home)
     A = np.zeros((3, 3))
     for i, phi in enumerate(PHI):
         r_hat = np.array([np.cos(phi), np.sin(phi), 0.0])
-        A[i] = Rb * r_hat + La * (np.cos(thetas_q[i]) * r_hat
+        A[i] = Rb * r_hat - La * (np.cos(thetas_q[i]) * r_hat
                                   + np.sin(thetas_q[i]) * np.array([0, 0, 1.0]))
 
     def residual(state):
@@ -197,14 +272,16 @@ ax_z = fig.add_axes([_xy_l + _xy_w + 0.03, _xy_b, 0.02, _xy_h])
 
 # ---- Sliders (below pickers) ----
 _sl_l, _sl_w = 0.64, 0.26
-ax_h  = fig.add_axes([_sl_l, 0.38, _sl_w, 0.022])
-ax_Rb = fig.add_axes([_sl_l, 0.32, _sl_w, 0.022])
-ax_La = fig.add_axes([_sl_l, 0.26, _sl_w, 0.022])
-ax_Lc = fig.add_axes([_sl_l, 0.20, _sl_w, 0.022])
-s_h  = Slider(ax_h,  'height', 0.04, 0.30, valinit=H0, valfmt='%.3f m')
-s_Rb = Slider(ax_Rb, 'Rb',     0.04, 0.25, valinit=Rb, valfmt='%.3f m')
-s_La = Slider(ax_La, 'La',     0.01, 0.12, valinit=La, valfmt='%.3f m')
-s_Lc = Slider(ax_Lc, 'Lc',     0.04, 0.30, valinit=Lc, valfmt='%.3f m')
+ax_h    = fig.add_axes([_sl_l, 0.38, _sl_w, 0.022])
+ax_Rb   = fig.add_axes([_sl_l, 0.32, _sl_w, 0.022])
+ax_La   = fig.add_axes([_sl_l, 0.26, _sl_w, 0.022])
+ax_Lc   = fig.add_axes([_sl_l, 0.20, _sl_w, 0.022])
+ax_ball = fig.add_axes([_sl_l, 0.14, _sl_w, 0.022])
+s_h    = Slider(ax_h,    'height',   0.04, 0.30, valinit=H0, valfmt='%.3f m')
+s_Rb   = Slider(ax_Rb,   'Rb',       0.04, 0.25, valinit=Rb, valfmt='%.3f m')
+s_La   = Slider(ax_La,   'La',       0.01, 0.12, valinit=La, valfmt='%.3f m')
+s_Lc   = Slider(ax_Lc,   'Lc',       0.04, 0.30, valinit=Lc, valfmt='%.3f m')
+s_ball = Slider(ax_ball, 'ball max', 5.0,  60.0, valinit=BALL_MAX_DEG, valfmt='%.1f deg')
 
 err_text = ax_xy.text(0.02, 0.98, '', transform=ax_xy.transAxes,
                       va='top', ha='left', fontsize=8, family='monospace',
@@ -230,9 +307,9 @@ ax.set_xlabel('X [m]'); ax.set_ylabel('Y [m]'); ax.set_zlabel('Z [m]')
 title = ax.set_title('', pad=10)
 
 # ---- XY picker setup ----
-XY_LIM = 0.4
+XY_LIM = 1.0
 Z_LIM  = (2.5, 3.5)
-target_state = {'x': 0.10, 'y': 0.0, 'z': 3.0}
+target_state = {'x': 0.0, 'y': 0.0, 'z': 3.0}
 
 ax_xy.set_xlim(-XY_LIM, XY_LIM); ax_xy.set_ylim(-XY_LIM, XY_LIM)
 ax_xy.set_aspect('equal')
@@ -271,16 +348,18 @@ def close_loop(pts):
 def update(_=None):
     h = s_h.val
     T = np.array([target_state['x'], target_state['y'], target_state['z']])
-    c = np.array([0.0, 0.0, h])
-    # aim platform normal from center toward target point
-    v = T - c
+    # Commanded aim direction: from nominal on-axis point (0,0,h) to T.
+    v = T - np.array([0.0, 0.0, h])
     nv = np.linalg.norm(v)
     if nv < 1e-9:
         n = np.array([0.0, 0.0, 1.0])
     else:
         n = v / nv
 
-    thetas, A, P, B, ok = inverse_kinematics(n, h)
+    thetas, A, P, B, ok, ball_angles = inverse_kinematics(n, h, s_ball.val)
+    # Actual plate center (shifted horizontally by the 3-RRS constraint).
+    cx_off, cy_off = plate_center_offset(rot_from_normal(n))
+    c = np.array([cx_off, cy_off, h])
 
     bp = close_loop(B)
     base_poly.set_data(bp[:, 0], bp[:, 1]); base_poly.set_3d_properties(bp[:, 2])
@@ -316,7 +395,8 @@ def update(_=None):
     if ok and not np.any(np.isnan(thetas)):
         n_act, zc_act, fk_ok = forward_kinematics(thetas, n, h)
         if fk_ok and n_act[2] > 1e-6:
-            c_act = np.array([0.0, 0.0, zc_act])
+            cx_act, cy_act = plate_center_offset(rot_from_normal(n_act))
+            c_act = np.array([cx_act, cy_act, zc_act])
             # ray c_act + t*n_act  intersected with plane z = T[2]
             t = (T[2] - c_act[2]) / n_act[2]
             hit = c_act + t * n_act
@@ -330,9 +410,22 @@ def update(_=None):
     else:
         actual_line.set_data([], []); actual_line.set_3d_properties([])
 
+    # P-side ball joint deflection summary (max across 3 legs)
+    if np.all(np.isnan(ball_angles)):
+        ball_txt = '  ball P   : N/A'
+    else:
+        max_P = np.nanmax(ball_angles)
+        flag = '  !!' if max_P > s_ball.val else ''
+        ball_txt = (
+            f'  ball P   : {max_P:5.2f} deg (max over 3 legs){flag}\n'
+            f'  ball lim : {s_ball.val:5.2f} deg'
+        )
+    # 3-RRS plate-center horizontal shift
+    ball_txt += (f'\n  c shift  : ({c[0]*1000:+6.2f}, {c[1]*1000:+6.2f}) mm')
+
     if np.isnan(hit[0]):
         xy_hit.set_data([], [])
-        err_text.set_text('  aim error: N/A')
+        err_text.set_text('  aim error: N/A\n' + ball_txt)
     else:
         xy_hit.set_data([hit[0]], [hit[1]])
         err_text.set_text(
@@ -340,7 +433,8 @@ def update(_=None):
             f'  actual  : ({hit[0]:+.4f}, {hit[1]:+.4f}, {hit[2]:.2f})\n'
             f'  err XY  : {err_xy*1000:7.3f} mm\n'
             f'  err ang : {err_ang:7.4f} deg\n'
-            f'  Rp(auto): {Rp:.4f} m'
+            f'  Rp(auto): {Rp:.4f} m\n'
+            + ball_txt
         )
 
     deg = np.rad2deg(thetas)
@@ -367,7 +461,7 @@ def recompute_workspace():
                 mask[iy, ix] = 1.0
                 continue
             n = v / nv
-            _, _, _, _, ok = inverse_kinematics(n, h)
+            _, _, _, _, ok, _ = inverse_kinematics(n, h, s_ball.val)
             mask[iy, ix] = 1.0 if ok else 0.0
     ws_img.set_data(mask)
 
@@ -408,6 +502,7 @@ s_h.on_changed(on_params)
 s_Rb.on_changed(on_params)
 s_La.on_changed(on_params)
 s_Lc.on_changed(on_params)
+s_ball.on_changed(on_params)
 
 recompute_workspace()
 update()
@@ -416,7 +511,7 @@ update()
 # -------------------- Programmatic entry point --------------------
 def solve(normal, height=H0):
     """Given a direction vector, return motor angles [deg]."""
-    thetas, *_ , ok = inverse_kinematics(normal, height)
+    thetas, _A, _P, _B, ok, _ba = inverse_kinematics(normal, height)
     return np.rad2deg(thetas), ok
 
 
