@@ -1,17 +1,22 @@
 """
 Tank-style Vehicle 2D Navigation Simulation
 - 잔디 환경에서 목표 지점(x, y)으로 주행하는 탱크 방식 로버 시뮬레이션
-- VIO 위치 추정 오차 모델링 + 외란(disturbance) 모델링 포함
+- SLAM 위치 추정 오차 모델링 + 외란(disturbance) 모델링 포함
 - 목표: 특정 오차 범위 내 도달
 """
 
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import FancyArrowPatch
 from dataclasses import dataclass, field
 from typing import Tuple, List
 import time
+
+# macOS 한글 폰트 설정
+matplotlib.rcParams['font.family'] = 'AppleGothic'
+matplotlib.rcParams['axes.unicode_minus'] = False
 
 
 # ──────────────────────────────────────────────
@@ -20,7 +25,7 @@ import time
 @dataclass
 class SimConfig:
     # 시뮬레이션
-    dt: float = 0.067           # 시간 스텝 (s) - 15Hz (Pi5 + D435i VIO 기준)
+    dt: float = 0.067           # 시간 스텝 (s) - 15Hz (Pi5 + D435i SLAM 기준)
     max_time: float = 60.0      # 최대 시뮬레이션 시간 (s)
 
     # 로버 물리 파라미터
@@ -44,17 +49,21 @@ class SimConfig:
     slip_factor_mean: float = 0.90       # 잔디 슬립 (평균 90% 전달)
     slip_factor_std: float = 0.05        # 슬립 변동
 
-    # VIO 오차 모델
-    vio_noise_xy_std: float = 0.05       # 위치 측정 가우시안 노이즈 (m)
-    vio_noise_theta_std: float = 0.02    # 헤딩 측정 노이즈 (rad)
-    vio_drift_rate: float = 0.005        # 드리프트 누적 속도 (m/s)
-    vio_drift_theta_rate: float = 0.002  # 헤딩 드리프트 속도 (rad/s)
+    # SLAM 오차 모델
+    slam_noise_xy_std: float = 0.03      # 위치 측정 가우시안 노이즈 (m) - SLAM은 맵 최적화로 VIO보다 낮음
+    slam_noise_theta_std: float = 0.015  # 헤딩 측정 노이즈 (rad)
+    slam_drift_rate: float = 0.003       # 드리프트 누적 속도 (m/s) - 맵 기반 보정으로 VIO보다 느림
+    slam_drift_theta_rate: float = 0.001 # 헤딩 드리프트 속도 (rad/s)
 
-    # VIO 신뢰도 필터
-    vio_jump_threshold: float = 0.5   # 한 스텝에 이 이상 점프하면 outlier (m)
-    vio_jump_theta_threshold: float = 0.3  # 헤딩 점프 threshold (rad, ~17°)
-    vio_lowconf_speed_scale: float = 0.3   # 신뢰도 낮을 때 속도 배율
-    vio_reject_holdoff: int = 3       # outlier 감지 후 무시할 프레임 수
+    # SLAM relocalization 실패
+    slam_reloc_failure_prob: float = 0.01      # relocalization 실패 확률 (특징점 부족 등)
+    slam_reloc_failure_noise: float = 0.3      # 실패 시 위치 오차 크기 (m)
+
+    # SLAM 신뢰도 필터
+    slam_jump_threshold: float = 0.5   # 한 스텝에 이 이상 점프하면 outlier (m)
+    slam_jump_theta_threshold: float = 0.3  # 헤딩 점프 threshold (rad, ~17°)
+    slam_lowconf_speed_scale: float = 0.3   # 신뢰도 낮을 때 속도 배율
+    slam_reject_holdoff: int = 3       # outlier 감지 후 무시할 프레임 수
 
     # 시리얼 통신 (Pi → OpenRB)
     serial_rate_hz: float = 15.0      # 명령 전송 주기 (Hz)
@@ -140,14 +149,14 @@ class DisturbanceModel:
 
 
 # ──────────────────────────────────────────────
-# VIO Error Model (시각-관성 주행거리계 오차)
+# SLAM Error Model (SLAM 측위 오차)
 # ──────────────────────────────────────────────
-class VIOModel:
+class SLAMModel:
     """
-    VIO 위치 추정 오차 모델:
-    - 가우시안 측정 노이즈
-    - 시간에 따라 누적되는 드리프트
-    - 가끔 발생하는 큰 오차 (특징점 부족 등)
+    SLAM 위치 추정 오차 모델:
+    - 가우시안 측정 노이즈 (맵 최적화로 VIO 대비 낮음)
+    - 시간에 따라 누적되는 드리프트 (맵 기반 보정으로 느리게 누적)
+    - relocalization 실패 시 큰 위치 오차 발생
     """
 
     def __init__(self, cfg: SimConfig):
@@ -161,21 +170,20 @@ class VIOModel:
                  dt: float) -> Tuple[float, float, float]:
         c = self.cfg
         self.time_elapsed += dt
-
         # 드리프트 누적 (랜덤 워크)
-        self.drift_x += np.random.normal(0, c.vio_drift_rate * dt)
-        self.drift_y += np.random.normal(0, c.vio_drift_rate * dt)
-        self.drift_theta += np.random.normal(0, c.vio_drift_theta_rate * dt)
+        self.drift_x += np.random.normal(0, c.slam_drift_rate * dt)
+        self.drift_y += np.random.normal(0, c.slam_drift_rate * dt)
+        self.drift_theta += np.random.normal(0, c.slam_drift_theta_rate * dt)
 
         # 측정 노이즈
-        noise_x = np.random.normal(0, c.vio_noise_xy_std)
-        noise_y = np.random.normal(0, c.vio_noise_xy_std)
-        noise_theta = np.random.normal(0, c.vio_noise_theta_std)
+        noise_x = np.random.normal(0, c.slam_noise_xy_std)
+        noise_y = np.random.normal(0, c.slam_noise_xy_std)
+        noise_theta = np.random.normal(0, c.slam_noise_theta_std)
 
-        # 가끔 큰 오차 발생 (2% 확률, 특징점 부족 상황)
-        if np.random.random() < 0.02:
-            noise_x += np.random.normal(0, c.vio_noise_xy_std * 5)
-            noise_y += np.random.normal(0, c.vio_noise_xy_std * 5)
+        # Relocalization 실패: 특징점 부족 등으로 큰 위치 오차 발생
+        if np.random.random() < c.slam_reloc_failure_prob:
+            noise_x += np.random.normal(0, c.slam_reloc_failure_noise)
+            noise_y += np.random.normal(0, c.slam_reloc_failure_noise)
 
         est_x = true_x + self.drift_x + noise_x
         est_y = true_y + self.drift_y + noise_y
@@ -189,14 +197,14 @@ class VIOModel:
 
 
 # ──────────────────────────────────────────────
-# VIO Confidence Filter (이상치 제거 + 신뢰도 판정)
+# SLAM Confidence Filter (이상치 제거 + 신뢰도 판정)
 # ──────────────────────────────────────────────
-class VIOFilter:
+class SLAMFilter:
     """
-    VIO 추정값의 이상치를 걸러내고 신뢰도를 판정.
+    SLAM 추정값의 이상치를 걸러내고 신뢰도를 판정.
     - 한 스텝에 비현실적으로 큰 위치 점프 → reject (이전 값 유지)
     - reject 연속 발생 시 신뢰도 저하 → 제어기에 감속 신호
-    - 실제 로버에서는 이 필터가 VIO raw 출력과 제어기 사이에 위치
+    - 실제 로버에서는 이 필터가 SLAM raw 출력과 제어기 사이에 위치
     """
 
     MAX_CONSECUTIVE_REJECTS = 10  # 이 이상 연속 reject 시 강제 수용 (reset)
@@ -212,7 +220,7 @@ class VIOFilter:
     def update(self, raw_x: float, raw_y: float, raw_theta: float,
                dt: float) -> Tuple[float, float, float, float]:
         """
-        VIO raw 추정값을 필터링.
+        SLAM raw 추정값을 ���터링.
         Returns: (filtered_x, filtered_y, filtered_theta, confidence)
         """
         c = self.cfg
@@ -239,15 +247,15 @@ class VIOFilter:
         # 물리적으로 가능한 최대 이동: max_speed * dt * 안전 마진
         max_possible_jump = c.max_speed * dt * 3.0
 
-        is_outlier = (jump_xy > max(c.vio_jump_threshold, max_possible_jump) or
-                      jump_theta > c.vio_jump_theta_threshold)
+        is_outlier = (jump_xy > max(c.slam_jump_threshold, max_possible_jump) or
+                      jump_theta > c.slam_jump_theta_threshold)
 
         if is_outlier or self.holdoff_remaining > 0:
             # Outlier → 이전 값 유지
             if is_outlier:
                 self.reject_count += 1
                 self.total_rejects += 1
-                self.holdoff_remaining = c.vio_reject_holdoff
+                self.holdoff_remaining = c.slam_reject_holdoff
             self.holdoff_remaining = max(0, self.holdoff_remaining - 1)
 
             # 신뢰도 감소
@@ -343,7 +351,7 @@ class SerialCommandSim:
 # ──────────────────────────────────────────────
 class NavigationController:
     """
-    VIO 추정 위치 기반으로 목표 지점까지 주행하는 제어기.
+    SLAM 추정 위치 기반으로 목표 지점까지 주행하는 제어기.
     - 거리 비례 선속도 제어
     - PID 각속도 제어
     """
@@ -355,7 +363,7 @@ class NavigationController:
 
     def compute(self, est_x: float, est_y: float, est_theta: float,
                 target_x: float, target_y: float,
-                vio_confidence: float = 1.0) -> Tuple[float, float]:
+                slam_confidence: float = 1.0) -> Tuple[float, float]:
         c = self.cfg
 
         dx = target_x - est_x
@@ -384,9 +392,9 @@ class NavigationController:
         v = c.kp_linear * distance * speed_factor * heading_factor
         v = np.clip(v, 0, c.max_speed)
 
-        # VIO 신뢰도 기반 감속: confidence 낮으면 속도 줄임
-        if vio_confidence < 0.8:
-            conf_scale = c.vio_lowconf_speed_scale + (1.0 - c.vio_lowconf_speed_scale) * (vio_confidence / 0.8)
+        # SLAM 신뢰도 기반 감속: confidence 낮으면 속도 줄임
+        if slam_confidence < 0.8:
+            conf_scale = c.slam_lowconf_speed_scale + (1.0 - c.slam_lowconf_speed_scale) * (slam_confidence / 0.8)
             v *= conf_scale
             omega *= conf_scale
 
@@ -408,7 +416,7 @@ class SimLog:
     filtered_x: List[float] = field(default_factory=list)
     filtered_y: List[float] = field(default_factory=list)
     filtered_theta: List[float] = field(default_factory=list)
-    vio_confidence: List[float] = field(default_factory=list)
+    slam_confidence: List[float] = field(default_factory=list)
     cmd_v: List[float] = field(default_factory=list)
     cmd_omega: List[float] = field(default_factory=list)
     serial_v: List[float] = field(default_factory=list)
@@ -416,8 +424,8 @@ class SimLog:
     actual_v: List[float] = field(default_factory=list)
     actual_omega: List[float] = field(default_factory=list)
     distance_to_goal: List[float] = field(default_factory=list)
-    vio_drift_x: List[float] = field(default_factory=list)
-    vio_drift_y: List[float] = field(default_factory=list)
+    slam_drift_x: List[float] = field(default_factory=list)
+    slam_drift_y: List[float] = field(default_factory=list)
 
 
 def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
@@ -426,8 +434,8 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
 
     vehicle = TankVehicle(cfg.start_x, cfg.start_y, cfg.start_theta, cfg.wheel_base)
     disturbance = DisturbanceModel(cfg)
-    vio = VIOModel(cfg)
-    vio_filter = VIOFilter(cfg)
+    slam =SLAMModel(cfg)
+    slam_filter = SLAMFilter(cfg)
     serial_cmd = SerialCommandSim(cfg)
     controller = NavigationController(cfg)
     log = SimLog()
@@ -438,17 +446,17 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
     while t < cfg.max_time:
         true_x, true_y, true_theta = vehicle.state
 
-        # VIO 위치 추정 (raw)
-        est_x, est_y, est_theta = vio.estimate(true_x, true_y, true_theta, cfg.dt)
+        # SLAM 위치 추정 (raw)
+        est_x, est_y, est_theta = slam.estimate(true_x, true_y, true_theta, cfg.dt)
 
-        # VIO 신뢰도 필터 (outlier rejection)
-        filt_x, filt_y, filt_theta, confidence = vio_filter.update(
+        # SLAM 신뢰도 필터 (outlier rejection)
+        filt_x, filt_y, filt_theta, confidence = slam_filter.update(
             est_x, est_y, est_theta, cfg.dt)
 
         # 제어 명령 계산 (필터링된 위치 + 신뢰도 기반 감속)
         v_cmd, omega_cmd = controller.compute(filt_x, filt_y, filt_theta,
                                                cfg.target_x, cfg.target_y,
-                                               vio_confidence=confidence)
+                                               slam_confidence=confidence)
 
         # 시리얼 프로토콜 시뮬레이션 (데드존 + 양자화 + rate limiting)
         v_serial, omega_serial, was_sent = serial_cmd.process(
@@ -472,7 +480,7 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
         log.filtered_x.append(filt_x)
         log.filtered_y.append(filt_y)
         log.filtered_theta.append(filt_theta)
-        log.vio_confidence.append(confidence)
+        log.slam_confidence.append(confidence)
         log.cmd_v.append(v_cmd)
         log.cmd_omega.append(omega_cmd)
         log.serial_v.append(v_serial)
@@ -480,8 +488,8 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
         log.actual_v.append(v_actual)
         log.actual_omega.append(omega_actual)
         log.distance_to_goal.append(dist)
-        log.vio_drift_x.append(vio.drift_x)
-        log.vio_drift_y.append(vio.drift_y)
+        log.slam_drift_x.append(slam.drift_x)
+        log.slam_drift_y.append(slam.drift_y)
 
         # 목표 도달 판정 (실제 위치 기준)
         if dist < cfg.goal_tolerance:
@@ -490,7 +498,7 @@ def run_simulation(cfg: SimConfig, seed: int = None) -> Tuple[SimLog, bool]:
 
         t += cfg.dt
 
-    print(f"[VIO Filter] Total outlier rejects: {vio_filter.total_rejects}")
+    print(f"[SLAM Filter] Total outlier rejects: {slam_filter.total_rejects}")
     print(f"[Serial] Packets sent: {serial_cmd.packet_count}")
 
     return log, reached
@@ -509,9 +517,9 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax1.set_facecolor('#c8e6c9')
 
     ax1.plot(log.true_x, log.true_y, 'b-', linewidth=1.5, label='True Path', alpha=0.8)
-    ax1.plot(log.est_x, log.est_y, 'r--', linewidth=1.0, label='VIO Raw', alpha=0.4)
+    ax1.plot(log.est_x, log.est_y, 'r--', linewidth=1.0, label='SLAM Raw', alpha=0.4)
     ax1.plot(log.filtered_x, log.filtered_y, 'm-', linewidth=1.0,
-             label='VIO Filtered', alpha=0.7)
+             label='SLAM Filtered', alpha=0.7)
 
     ax1.plot(cfg.start_x, cfg.start_y, 'gs', markersize=12, label='Start', zorder=5)
 
@@ -567,16 +575,16 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
     ax3.legend(fontsize=7)
     ax3.grid(True, alpha=0.3)
 
-    # ── 4) VIO 드리프트 ──
+    # ── 4) SLAM 드리프트 ──
     ax4 = fig.add_subplot(3, 3, 5)
-    ax4.plot(log.time, log.vio_drift_x, 'r-', label='Drift X')
-    ax4.plot(log.time, log.vio_drift_y, 'g-', label='Drift Y')
+    ax4.plot(log.time, log.slam_drift_x, 'r-', label='Drift X')
+    ax4.plot(log.time, log.slam_drift_y, 'g-', label='Drift Y')
     drift_mag = [np.sqrt(dx**2 + dy**2) for dx, dy in
-                 zip(log.vio_drift_x, log.vio_drift_y)]
+                 zip(log.slam_drift_x, log.slam_drift_y)]
     ax4.plot(log.time, drift_mag, 'k--', label='|Drift|', alpha=0.6)
     ax4.set_xlabel('Time (s)')
     ax4.set_ylabel('Drift (m)')
-    ax4.set_title('VIO Drift Accumulation')
+    ax4.set_title('SLAM Drift Accumulation')
     ax4.legend(fontsize=8)
     ax4.grid(True, alpha=0.3)
 
@@ -589,22 +597,22 @@ def plot_results(log: SimLog, cfg: SimConfig, reached: bool):
                       for tx, fx, ty, fy in
                       zip(log.true_x, log.filtered_x, log.true_y, log.filtered_y)]
 
-    ax5.plot(log.time, raw_pos_error, 'r-', label='Raw VIO Error', alpha=0.5, linewidth=0.8)
+    ax5.plot(log.time, raw_pos_error, 'r-', label='Raw SLAM Error', alpha=0.5, linewidth=0.8)
     ax5.plot(log.time, filt_pos_error, 'b-', label='Filtered Error', alpha=0.8, linewidth=1.2)
     ax5.set_xlabel('Time (s)')
     ax5.set_ylabel('Position Error (m)')
-    ax5.set_title('VIO Error: Raw vs Filtered')
+    ax5.set_title('SLAM Error: Raw vs Filtered')
     ax5.legend(fontsize=8)
     ax5.grid(True, alpha=0.3)
 
-    # ── 6) VIO Confidence ──
+    # ── 6) SLAM Confidence ──
     ax6 = fig.add_subplot(3, 3, 7)
-    ax6.plot(log.time, log.vio_confidence, 'purple', linewidth=1.2)
+    ax6.plot(log.time, log.slam_confidence, 'purple', linewidth=1.2)
     ax6.axhline(y=0.8, color='orange', linestyle='--', label='Slowdown threshold', alpha=0.7)
-    ax6.fill_between(log.time, 0, log.vio_confidence, alpha=0.15, color='purple')
+    ax6.fill_between(log.time, 0, log.slam_confidence, alpha=0.15, color='purple')
     ax6.set_xlabel('Time (s)')
     ax6.set_ylabel('Confidence')
-    ax6.set_title('VIO Confidence (Filter)')
+    ax6.set_title('SLAM Confidence (Filter)')
     ax6.set_ylim(-0.05, 1.1)
     ax6.legend(fontsize=8)
     ax6.grid(True, alpha=0.3)
@@ -706,31 +714,125 @@ def monte_carlo(cfg: SimConfig, n_runs: int = 50):
 # Real-time Animation
 # ──────────────────────────────────────────────
 def run_animation(cfg: SimConfig, seed: int = 42):
-    """실시간 애니메이션으로 시뮬레이션 시각화"""
-    np.random.seed(seed)
+    """
+    인터랙티브 애니메이션 시뮬레이션.
+    1) 설정 화면: 좌클릭으로 출발 위치, 우클릭으로 목표 위치 지정
+    2) ▶ Play 버튼을 누르면 시뮬레이션 시작
+    """
+    from matplotlib.widgets import Button
 
+    # ── 1단계: 인터랙티브 설정 화면 ──
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    plt.subplots_adjust(bottom=0.15)
+
+    state = {
+        'start': None,
+        'target': None,
+        'running': False,
+        'start_marker': None,
+        'target_marker': None,
+        'target_circle': None,
+    }
+
+    def draw_setup():
+        ax.clear()
+        ax.set_facecolor('#c8e6c9')
+        ax.set_xlim(-2, 10)
+        ax.set_ylim(-2, 10)
+        ax.set_aspect('equal')
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.grid(True, alpha=0.3)
+
+        title_parts = ['[Setup] Left-click: Start | Right-click: Target']
+        if state['start'] is not None:
+            sx, sy = state['start']
+            ax.plot(sx, sy, 'gs', markersize=14, zorder=5, label=f'Start ({sx:.1f}, {sy:.1f})')
+            title_parts.append(f'Start=({sx:.1f}, {sy:.1f})')
+        if state['target'] is not None:
+            tx, ty = state['target']
+            ax.plot(tx, ty, 'r*', markersize=18, zorder=5, label=f'Target ({tx:.1f}, {ty:.1f})')
+            goal_circle = plt.Circle((tx, ty), cfg.goal_tolerance,
+                                      color='red', fill=False, linewidth=2, linestyle='--')
+            ax.add_patch(goal_circle)
+            title_parts.append(f'Target=({tx:.1f}, {ty:.1f})')
+
+        ax.set_title(' | '.join(title_parts))
+        if state['start'] is not None or state['target'] is not None:
+            ax.legend(loc='upper left', fontsize=9)
+        fig.canvas.draw_idle()
+
+    def on_click(event):
+        if state['running']:
+            return
+        if event.inaxes != ax:
+            return
+
+        if event.button == 1:  # Left-click: Start
+            state['start'] = (event.xdata, event.ydata)
+        elif event.button == 3:  # Right-click: Target
+            state['target'] = (event.xdata, event.ydata)
+
+        draw_setup()
+
+    def on_play(event):
+        if state['start'] is None or state['target'] is None:
+            ax.set_title('[Error] Please set both Start and Target positions!',
+                         color='red', fontweight='bold')
+            fig.canvas.draw_idle()
+            return
+        state['running'] = True
+
+    cid = fig.canvas.mpl_connect('button_press_event', on_click)
+
+    ax_btn = plt.axes([0.4, 0.03, 0.2, 0.06])
+    btn_play = Button(ax_btn, '▶ Play', color='#4CAF50', hovercolor='#66BB6A')
+    btn_play.label.set_fontsize(14)
+    btn_play.label.set_fontweight('bold')
+    btn_play.on_clicked(on_play)
+
+    draw_setup()
+
+    # Play 버튼이 눌릴 때까지 대기
+    while not state['running']:
+        plt.pause(0.1)
+        if not plt.fignum_exists(fig.number):
+            return  # 창이 닫히면 종료
+
+    fig.canvas.mpl_disconnect(cid)
+
+    # ── 2단계: 시뮬레이션 실행 ──
+    sx, sy = state['start']
+    tx, ty = state['target']
+    cfg.start_x, cfg.start_y = sx, sy
+    cfg.target_x, cfg.target_y = tx, ty
+
+    np.random.seed(seed)
     vehicle = TankVehicle(cfg.start_x, cfg.start_y, cfg.start_theta, cfg.wheel_base)
     disturbance = DisturbanceModel(cfg)
-    vio = VIOModel(cfg)
-    vio_filter = VIOFilter(cfg)
+    slam =SLAMModel(cfg)
+    slam_filter = SLAMFilter(cfg)
     serial_cmd = SerialCommandSim(cfg)
     controller = NavigationController(cfg)
 
-    plt.ion()
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    # Play 버튼 숨기기
+    ax_btn.set_visible(False)
 
     true_path_x, true_path_y = [], []
     est_path_x, est_path_y = [], []
 
     t = 0.0
     while t < cfg.max_time:
+        if not plt.fignum_exists(fig.number):
+            return  # 창이 닫히면 종료
+
         true_x, true_y, true_theta = vehicle.state
-        est_x, est_y, est_theta = vio.estimate(true_x, true_y, true_theta, cfg.dt)
-        filt_x, filt_y, filt_theta, confidence = vio_filter.update(
+        est_x, est_y, est_theta = slam.estimate(true_x, true_y, true_theta, cfg.dt)
+        filt_x, filt_y, filt_theta, confidence = slam_filter.update(
             est_x, est_y, est_theta, cfg.dt)
         v_cmd, omega_cmd = controller.compute(filt_x, filt_y, filt_theta,
                                                cfg.target_x, cfg.target_y,
-                                               vio_confidence=confidence)
+                                               slam_confidence=confidence)
         v_serial, omega_serial, _ = serial_cmd.process(v_cmd, omega_cmd, cfg.dt)
         vehicle.update(v_serial, omega_serial, cfg.dt, disturbance)
 
@@ -747,7 +849,7 @@ def run_animation(cfg: SimConfig, seed: int = 42):
             ax.set_facecolor('#c8e6c9')
 
             ax.plot(true_path_x, true_path_y, 'b-', linewidth=1.5, label='True')
-            ax.plot(est_path_x, est_path_y, 'r--', linewidth=1.0, label='VIO Est.', alpha=0.6)
+            ax.plot(est_path_x, est_path_y, 'r--', linewidth=1.0, label='SLAM Est.', alpha=0.6)
 
             # 로버 표시
             rover_size = 0.15
@@ -800,7 +902,6 @@ def run_animation(cfg: SimConfig, seed: int = 42):
 
         t += cfg.dt
 
-    plt.ioff()
     plt.show()
 
 
@@ -821,10 +922,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--slip', type=float, default=0.90,
                         help='Mean slip factor (0-1, lower = more slip)')
-    parser.add_argument('--vio_noise', type=float, default=0.05,
-                        help='VIO position noise std (m)')
-    parser.add_argument('--vio_drift', type=float, default=0.005,
-                        help='VIO drift rate (m/s)')
+    parser.add_argument('--slam_noise', type=float, default=0.03,
+                        help='SLAM position noise std (m)')
+    parser.add_argument('--slam_drift', type=float, default=0.003,
+                        help='SLAM drift rate (m/s)')
     args = parser.parse_args()
 
     cfg = SimConfig(
@@ -833,14 +934,14 @@ if __name__ == '__main__':
         goal_tolerance=args.tolerance,
         max_time=args.max_time,
         slip_factor_mean=args.slip,
-        vio_noise_xy_std=args.vio_noise,
-        vio_drift_rate=args.vio_drift,
+        slam_noise_xy_std=args.slam_noise,
+        slam_drift_rate=args.slam_drift,
     )
 
     print(f"Target: ({cfg.target_x}, {cfg.target_y})")
     print(f"Tolerance: {cfg.goal_tolerance}m")
-    print(f"Slip: {cfg.slip_factor_mean:.0%} | VIO noise: {cfg.vio_noise_xy_std}m "
-          f"| VIO drift: {cfg.vio_drift_rate}m/s")
+    print(f"Slip: {cfg.slip_factor_mean:.0%} | SLAM noise: {cfg.slam_noise_xy_std}m "
+          f"| SLAM drift: {cfg.slam_drift_rate}m/s")
 
     if args.mode == 'single':
         log, reached = run_simulation(cfg, seed=args.seed)
