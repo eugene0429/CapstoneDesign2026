@@ -9,7 +9,9 @@ import numpy as np
 
 from perception.training.visualize_dataset import (
     draw_bbox_on_image,
+    iter_pairs_for_scenario,
     iter_pairs_for_split,
+    list_scenarios,
     read_yolo_bboxes,
 )
 
@@ -98,6 +100,75 @@ class TestReadYoloBboxes(unittest.TestCase):
             p = Path(tmp) / "a.txt"
             p.write_text("0 0.5 0.5 0.2 0.2\n\n   \n")
             self.assertEqual(len(read_yolo_bboxes(p)), 1)
+
+
+def _seed_raw_dataset(dataset_root: Path,
+                      scenarios: dict[str, list[str]]) -> None:
+    """Build a synthetic raw dataset matching the prepare_dataset layout.
+
+    `scenarios` maps directory name (e.g. 'scenario_01_4m_left') to a list of
+    image stems. Each image gets a single dummy YOLO label.
+    """
+    for scen_dir, stems in scenarios.items():
+        scen_id = scen_dir.split("_")[1]
+        imgs = dataset_root / "imgs" / scen_dir
+        labs = dataset_root / "labels" / f"{scen_id}_labels"
+        imgs.mkdir(parents=True)
+        labs.mkdir(parents=True)
+        for stem in stems:
+            cv2.imwrite(str(imgs / f"{stem}.jpg"),
+                        np.full((100, 200, 3), 128, dtype=np.uint8))
+            (labs / f"{stem}.txt").write_text("0 0.5 0.5 0.2 0.2")
+
+
+class TestIterPairsForScenario(unittest.TestCase):
+    def test_match_by_zero_padded_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp)
+            _seed_raw_dataset(ds, {
+                "scenario_01_4m_left":   ["a", "b"],
+                "scenario_02_4m_middle": ["c"],
+            })
+            pairs = iter_pairs_for_scenario(ds, "01")
+            self.assertEqual(sorted(p[0].stem for p in pairs), ["a", "b"])
+
+    def test_match_by_unpadded_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp)
+            _seed_raw_dataset(ds, {"scenario_01_4m_left": ["a"]})
+            pairs = iter_pairs_for_scenario(ds, "1")  # unpadded
+            self.assertEqual(len(pairs), 1)
+
+    def test_match_by_name_substring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp)
+            _seed_raw_dataset(ds, {
+                "scenario_01_4m_left":   ["a"],
+                "scenario_06_2m_right":  ["z"],
+            })
+            pairs = iter_pairs_for_scenario(ds, "2m_right")
+            self.assertEqual([p[0].stem for p in pairs], ["z"])
+
+    def test_raises_on_no_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp)
+            _seed_raw_dataset(ds, {"scenario_01_4m_left": ["a"]})
+            with self.assertRaises(ValueError) as ctx:
+                iter_pairs_for_scenario(ds, "nope")
+            self.assertIn("nope", str(ctx.exception))
+
+
+class TestListScenarios(unittest.TestCase):
+    def test_returns_sorted_dir_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = Path(tmp)
+            _seed_raw_dataset(ds, {
+                "scenario_02_4m_middle": ["b"],
+                "scenario_01_4m_left":   ["a"],
+            })
+            names = list_scenarios(ds)
+            self.assertEqual(names,
+                             ["scenario_01_4m_left", "scenario_02_4m_middle"])
 
 
 class TestDrawBboxOnImage(unittest.TestCase):

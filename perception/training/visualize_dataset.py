@@ -15,6 +15,9 @@ Usage:
     python -m perception.training.visualize_dataset                  # aug train
     python -m perception.training.visualize_dataset --all-train      # orig + aug
     python -m perception.training.visualize_dataset --split val
+    python -m perception.training.visualize_dataset --scenario 01    # raw scenario_01_*
+    python -m perception.training.visualize_dataset --scenario 4m_left
+    python -m perception.training.visualize_dataset --list-scenarios
     python -m perception.training.visualize_dataset --shuffle --seed 7
 """
 from __future__ import annotations
@@ -27,7 +30,44 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 
+from perception.training.prepare_dataset import (
+    discover_scenarios,
+    pair_images_with_labels,
+)
+
 HERE = Path(__file__).resolve().parent
+DEFAULT_DATASET_ROOT = HERE.parent / "dataset"
+
+
+def iter_pairs_for_scenario(
+    dataset_root: Path,
+    query: str,
+) -> List[Tuple[Path, Path]]:
+    """Return (img, lab) pairs for a scenario from the raw dataset.
+
+    `query` matches against the scenario id (e.g. "01", "1") OR a substring
+    of the directory name (e.g. "4m_left", "scenario_01"). The first match
+    wins, by id first then by name substring.
+
+    Raises ValueError if no scenario matches.
+    """
+    scenarios = discover_scenarios(dataset_root)
+    padded = query.zfill(2) if query.isdigit() else None
+    if padded is not None:
+        for sid, imgs_dir, labels_dir in scenarios:
+            if sid == padded:
+                return pair_images_with_labels(imgs_dir, labels_dir)
+    q_lower = query.lower()
+    for sid, imgs_dir, labels_dir in scenarios:
+        if q_lower in imgs_dir.name.lower():
+            return pair_images_with_labels(imgs_dir, labels_dir)
+    available = ", ".join(s[1].name for s in scenarios)
+    raise ValueError(f"scenario not found: {query!r}. available: {available}")
+
+
+def list_scenarios(dataset_root: Path) -> List[str]:
+    """Return human-readable scenario names sorted by id."""
+    return [imgs_dir.name for _sid, imgs_dir, _lab in discover_scenarios(dataset_root)]
 
 
 def iter_pairs_for_split(
@@ -158,18 +198,36 @@ def main():
     )
     ap.add_argument("--training-root", type=Path, default=HERE,
                     help=f"training root containing data/ (default: {HERE})")
+    ap.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT,
+                    help=f"raw dataset root with imgs/scenario_NN_*/ "
+                         f"(default: {DEFAULT_DATASET_ROOT})")
     ap.add_argument("--split", choices=["train", "val", "test"], default="train")
     ap.add_argument("--all-train", action="store_true",
                     help="include originals along with augmented (split=train only)")
+    ap.add_argument("--scenario", type=str, default=None,
+                    help="show originals from a specific raw scenario "
+                         "(id like '01' or substring like '4m_left'). "
+                         "When set, --split / --all-train are ignored.")
+    ap.add_argument("--list-scenarios", action="store_true",
+                    help="print available raw scenarios and exit")
     ap.add_argument("--shuffle", action="store_true",
                     help="randomise traversal order")
     ap.add_argument("--seed", type=int, default=42,
                     help="seed used when --shuffle is set")
     args = ap.parse_args()
 
-    pairs = iter_pairs_for_split(
-        args.training_root, args.split, include_originals=args.all_train,
-    )
+    if args.list_scenarios:
+        for name in list_scenarios(args.dataset_root):
+            print(name)
+        return
+
+    if args.scenario is not None:
+        pairs = iter_pairs_for_scenario(args.dataset_root, args.scenario)
+    else:
+        pairs = iter_pairs_for_split(
+            args.training_root, args.split, include_originals=args.all_train,
+        )
+
     if args.shuffle:
         random.Random(args.seed).shuffle(pairs)
 
