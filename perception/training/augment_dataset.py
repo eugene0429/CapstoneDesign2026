@@ -158,3 +158,52 @@ def generate_one(
     out = transform(image=image, bboxes=bboxes, class_labels=class_labels)
     cv2.imwrite(str(out_img), out["image"])
     _write_label_yolo(out_lab, list(out["bboxes"]), list(out["class_labels"]))
+
+
+def augment(
+    training_root: Path,
+    multiplier: int = 5,
+    rebuild: bool = False,
+    seed: int = 42,
+) -> None:
+    """Generate `multiplier` augmented copies per original train pair.
+
+    Idempotent: skips when any `*_aug*` file already exists in train/ unless
+    `rebuild=True`. With `rebuild=True`, all `*_aug*` files are deleted first.
+    `multiplier=0` is a no-op (returns immediately after wipe if rebuild).
+    """
+    img_dir, _lab_dir = _train_dirs(training_root)
+
+    has_aug = any("_aug" in p.stem for p in img_dir.iterdir())
+    if has_aug and not rebuild:
+        print(f"[augment] augmented files already present in {img_dir}, skipping "
+              f"(use --rebuild to regenerate)")
+        return
+    if rebuild:
+        wipe_augmented(training_root)
+
+    if multiplier <= 0:
+        print("[augment] multiplier=0, no augmentation generated")
+        return
+
+    pairs = list_original_train_pairs(training_root)
+    transform = build_transform()
+    empty_labels = 0
+
+    for src_img, src_lab in pairs:
+        for i in range(multiplier):
+            out_img = src_img.with_name(f"{src_img.stem}_aug{i}{src_img.suffix}")
+            out_lab = src_lab.with_name(f"{src_lab.stem}_aug{i}{src_lab.suffix}")
+            sample_seed = seed + hash((src_img.stem, i)) % (2**32)
+            generate_one(src_img, src_lab, out_img, out_lab, transform, sample_seed)
+            if out_lab.stat().st_size == 0:
+                empty_labels += 1
+
+    total_aug = len(pairs) * multiplier
+    print(f"[augment] generated {total_aug} augmented copies "
+          f"({len(pairs)} originals × {multiplier})")
+    if empty_labels:
+        pct = 100.0 * empty_labels / total_aug
+        print(f"[augment] WARNING: {empty_labels}/{total_aug} ({pct:.1f}%) "
+              f"augmented samples have empty labels (bboxes dropped). "
+              f"If excessive, re-run with tighter rotation/scale params.")
