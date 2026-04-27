@@ -13,6 +13,7 @@ Run directly:
 """
 from __future__ import annotations
 
+import argparse
 import random
 from pathlib import Path
 from typing import List, Tuple
@@ -207,3 +208,29 @@ def augment(
         print(f"[augment] WARNING: {empty_labels}/{total_aug} ({pct:.1f}%) "
               f"augmented samples have empty labels (bboxes dropped). "
               f"If excessive, re-run with tighter rotation/scale params.")
+
+
+def main():
+    here = Path(__file__).resolve().parent
+    default_training = here
+
+    ap = argparse.ArgumentParser(
+        description="Offline augmentation for YOLO26n bell-detection train split.",
+    )
+    ap.add_argument("--training-root", type=Path, default=default_training,
+                    help=f"training root containing data/ (default: {default_training})")
+    ap.add_argument("--multiplier", type=int, default=5,
+                    help="augmented copies per original (default: 5)")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="wipe existing *_aug* files before regenerating")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
+
+    augment(args.training_root,
+            multiplier=args.multiplier,
+            rebuild=args.rebuild,
+            seed=args.seed)
+
+
+if __name__ == "__main__":
+    main()
