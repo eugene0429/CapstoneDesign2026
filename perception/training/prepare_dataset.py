@@ -13,6 +13,7 @@ Run directly:
 """
 from __future__ import annotations
 
+import argparse
 import random
 import re
 import shutil
@@ -206,3 +207,29 @@ def prepare(
           f"test={len(splits['test'])}")
     print(f"[prepare] dataset.yaml -> {yaml_path}")
     return yaml_path
+
+
+def main():
+    here = Path(__file__).resolve().parent
+    repo_root = here.parent.parent
+    default_dataset = repo_root / "perception" / "dataset"
+    default_training = here
+
+    ap = argparse.ArgumentParser(
+        description="Prepare YOLO26n bell-detection dataset (split + symlink + yaml)."
+    )
+    ap.add_argument("--dataset-root", type=Path, default=default_dataset,
+                    help=f"raw dataset root (default: {default_dataset})")
+    ap.add_argument("--training-root", type=Path, default=default_training,
+                    help=f"training output root (default: {default_training})")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="wipe data/ and dataset.yaml before regenerating")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args()
+
+    prepare(args.dataset_root, args.training_root,
+            rebuild=args.rebuild, seed=args.seed)
+
+
+if __name__ == "__main__":
+    main()
