@@ -336,7 +336,7 @@ def build_transform() -> A.Compose:
                 brightness_limit=0.15, contrast_limit=0.15, p=0.5,
             ),
             A.HorizontalFlip(p=0.5),
-            A.GaussNoise(var_limit=(0.0, 25.0), p=0.3),
+            A.GaussNoise(std_range=(0.0, 0.02), p=0.3),
         ],
         bbox_params=A.BboxParams(
             format="yolo",
