@@ -2,9 +2,10 @@
 Perception Module - Unified Entry Point
 =======================================
 
-Supports 3 run modes:
+Run modes:
   python main.py capture     → Data collection
-  python main.py vio         → VIO localization test
+  python main.py vio         → Custom VIO localization
+  python main.py orbslam     → ORB-SLAM3 localization (default: --pi --no-imu, headless library)
   python main.py detect      → Target detection + 3D position estimation
 """
 
@@ -19,8 +20,9 @@ def main():
         epilog="""
 Mode descriptions:
   capture   Collect YOLO training data with RealSense camera
-  vio       Real-time localization via Visual-Inertial Odometry (custom implementation)
-  orbslam   ORB-SLAM3 RGB-D-Inertial localization test
+  vio       Real-time localization via custom Visual-Inertial Odometry
+  orbslam   ORB-SLAM3 localization
+            (default: production library = --pi + --no-imu + headless)
   detect    Target detection + depth-based 3D position estimation
         """,
     )
@@ -33,17 +35,30 @@ Mode descriptions:
         "--model", type=str, default=None,
         help="YOLO model path (used in detect mode)",
     )
+    # ── orbslam / vio 공용 ──
+    parser.add_argument(
+        "--imu", action="store_true",
+        help="orbslam: enable IMU (default off). vio: ignored.",
+    )
     parser.add_argument(
         "--no-imu", action="store_true",
-        help="Disable IMU and run in Visual-Only mode (shared by vio / orbslam)",
+        help="vio: disable IMU. orbslam: redundant (IMU is off by default).",
+    )
+    parser.add_argument(
+        "--no-pi", action="store_true",
+        help="orbslam: disable Pi-optimized yaml (default Pi mode on).",
     )
     parser.add_argument(
         "--pi", action="store_true",
-        help="Pi optimization mode: 424x240@15fps, nFeatures=500, viewer OFF (orbslam only)",
+        help="orbslam: redundant (Pi mode is on by default).",
+    )
+    parser.add_argument(
+        "--gui", action="store_true",
+        help="orbslam: legacy GUI test runner (with cv2 viewer + resource report).",
     )
     parser.add_argument(
         "--headless", action="store_true",
-        help="Headless mode: no GUI, print world-frame (x, y, theta) to terminal (vio only)",
+        help="vio: headless mode (terminal print). orbslam: redundant (always headless library).",
     )
 
     args, remaining = parser.parse_known_args()
@@ -66,14 +81,22 @@ Mode descriptions:
 
     elif args.mode == "orbslam":
         import os
-        if args.pi or args.headless:
-            os.environ["ORBSLAM_NO_VIEWER"] = "1"
-        if args.headless:
-            from vio.orbslam_runner import run_orbslam_headless
-            run_orbslam_headless(use_imu=(not args.no_imu), pi_mode=args.pi)
-        else:
+        os.environ.setdefault("ORBSLAM_NO_VIEWER", "1")
+
+        # 기본값: --pi --no-imu --headless 와 동등 (production 라이브러리 모듈)
+        use_imu = args.imu                  # default False
+        pi_mode = not args.no_pi            # default True
+
+        if args.gui:
+            # 레거시 GUI 테스트 러너 (cv2 viewer + ResourceMonitor)
             from vio.orbslam_runner import run_orbslam
-            run_orbslam(use_imu=(not args.no_imu), pi_mode=args.pi)
+            os.environ.pop("ORBSLAM_NO_VIEWER", None)
+            run_orbslam(use_imu=use_imu, pi_mode=pi_mode)
+        else:
+            # 새 production 모듈로 헤드리스 실행
+            from vio.orbslam_localizer import (
+                LocalizerConfig, _print_loop)
+            _print_loop(LocalizerConfig(use_imu=use_imu, pi_mode=pi_mode))
 
     elif args.mode == "detect":
         print("[DETECT] Target detection + 3D position estimation mode")
