@@ -16,6 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple
 
+import albumentations as A
+import cv2
+
 
 def _train_dirs(training_root: Path) -> Tuple[Path, Path]:
     return (
@@ -60,3 +63,34 @@ def wipe_augmented(training_root: Path) -> None:
         for p in d.iterdir():
             if "_aug" in p.stem:
                 p.unlink()
+
+
+def build_transform() -> A.Compose:
+    """Build the per-sample albumentations pipeline.
+
+    Each albumentations call samples its own random state internally; deterministic
+    seeding for the whole augmentation run is handled in `augment()` by calling
+    `np.random.seed(...)` before each transform invocation.
+    """
+    return A.Compose(
+        [
+            A.HueSaturationValue(
+                hue_shift_limit=10,
+                sat_shift_limit=70,
+                val_shift_limit=40,
+                p=1.0,
+            ),
+            A.Rotate(limit=5, border_mode=cv2.BORDER_REFLECT, p=0.5),
+            A.RandomScale(scale_limit=0.1, p=0.5),
+            A.RandomBrightnessContrast(
+                brightness_limit=0.15, contrast_limit=0.15, p=0.5,
+            ),
+            A.HorizontalFlip(p=0.5),
+            A.GaussNoise(std_range=(0.0, 0.02), p=0.3),
+        ],
+        bbox_params=A.BboxParams(
+            format="yolo",
+            label_fields=["class_labels"],
+            min_visibility=0.3,
+        ),
+    )
