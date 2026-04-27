@@ -141,5 +141,114 @@ class TestStratifiedSplit(unittest.TestCase):
         self.assertEqual(len(val_set  & test_set), 0)
 
 
+from perception.training.prepare_dataset import (
+    build_symlink_tree,
+    write_dataset_yaml,
+    prepare,
+)
+
+
+class TestBuildSymlinkTree(unittest.TestCase):
+    def test_creates_expected_directory_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_imgs = root / "src_imgs"; src_imgs.mkdir()
+            src_labs = root / "src_labs"; src_labs.mkdir()
+            (src_imgs / "a.jpg").write_bytes(b"\xff")
+            (src_labs / "a.txt").write_text("0 .5 .5 .1 .1")
+            splits = {
+                "train": [(src_imgs / "a.jpg", src_labs / "a.txt")],
+                "val": [], "test": [],
+            }
+            out = root / "data"
+            build_symlink_tree(splits, out)
+            self.assertTrue((out / "images" / "train" / "a.jpg").is_symlink())
+            self.assertTrue((out / "labels" / "train" / "a.txt").is_symlink())
+            for split in ("val", "test"):
+                self.assertTrue((out / "images" / split).is_dir())
+                self.assertTrue((out / "labels" / split).is_dir())
+
+    def test_raises_on_filename_collision_within_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d1 = root / "d1"; d1.mkdir()
+            d2 = root / "d2"; d2.mkdir()
+            (d1 / "x.jpg").write_bytes(b"\xff")
+            (d2 / "x.jpg").write_bytes(b"\xff")
+            (d1 / "x.txt").write_text("0 .5 .5 .1 .1")
+            (d2 / "x.txt").write_text("0 .5 .5 .1 .1")
+            splits = {
+                "train": [(d1 / "x.jpg", d1 / "x.txt"),
+                          (d2 / "x.jpg", d2 / "x.txt")],
+                "val": [], "test": [],
+            }
+            with self.assertRaises(ValueError) as ctx:
+                build_symlink_tree(splits, root / "data")
+            self.assertIn("collision", str(ctx.exception).lower())
+
+
+class TestWriteDatasetYaml(unittest.TestCase):
+    def test_writes_yaml_with_correct_keys_and_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            yaml_path = root / "dataset.yaml"
+            write_dataset_yaml(root / "data", yaml_path, ["bell"])
+            content = yaml_path.read_text()
+            self.assertIn(f"path: {(root / 'data').resolve()}", content)
+            self.assertIn("train: images/train", content)
+            self.assertIn("val: images/val", content)
+            self.assertIn("test: images/test", content)
+            self.assertIn("0: bell", content)
+
+
+class TestPrepareOrchestrator(unittest.TestCase):
+    def _build_dataset(self, root: Path, n_per_scenario: int = 30):
+        scenarios = {
+            "scenario_01_4m_left":   [(f"img_{i:03d}", "0 .5 .5 .1 .1")
+                                      for i in range(n_per_scenario)],
+            "scenario_02_2m_middle": [(f"img_{n_per_scenario + i:03d}", "0 .5 .5 .1 .1")
+                                      for i in range(n_per_scenario)],
+        }
+        _make_synthetic_dataset(root, scenarios)
+
+    def test_prepare_creates_yaml_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ds = root / "ds"; ds.mkdir()
+            self._build_dataset(ds)
+            train_root = root / "training"
+            yaml_path = prepare(ds, train_root)
+            self.assertTrue(yaml_path.is_file())
+            self.assertTrue((train_root / "data" / "images" / "train").is_dir())
+            n_imgs = sum(1 for _ in (train_root / "data" / "images" / "train").iterdir())
+            self.assertGreater(n_imgs, 0)
+
+    def test_prepare_is_idempotent_skips_when_yaml_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ds = root / "ds"; ds.mkdir()
+            self._build_dataset(ds)
+            train_root = root / "training"
+            prepare(ds, train_root)
+            mtime_before = (train_root / "dataset.yaml").stat().st_mtime
+            # second call should be a no-op
+            prepare(ds, train_root)
+            mtime_after = (train_root / "dataset.yaml").stat().st_mtime
+            self.assertEqual(mtime_before, mtime_after)
+
+    def test_prepare_rebuild_overwrites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ds = root / "ds"; ds.mkdir()
+            self._build_dataset(ds)
+            train_root = root / "training"
+            prepare(ds, train_root)
+            # touch a stale file inside data/ to verify rebuild wipes it
+            stale = train_root / "data" / "images" / "train" / "stale.jpg"
+            stale.write_bytes(b"x")
+            prepare(ds, train_root, rebuild=True)
+            self.assertFalse(stale.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

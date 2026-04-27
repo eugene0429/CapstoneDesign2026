@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import random
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -95,3 +96,82 @@ def stratified_split(
         for i, key in enumerate(keys):
             out[key].extend(items[cuts[i]: cuts[i + 1]])
     return out
+
+
+def build_symlink_tree(splits: SplitDict, out_root: Path) -> None:
+    """Materialise out_root/{images,labels}/{train,val,test}/ as symlinks.
+
+    Raises ValueError if two source files would land at the same destination.
+    """
+    for split in ("train", "val", "test"):
+        (out_root / "images" / split).mkdir(parents=True, exist_ok=True)
+        (out_root / "labels" / split).mkdir(parents=True, exist_ok=True)
+    for split, pairs in splits.items():
+        seen: set[str] = set()
+        for img, lab in pairs:
+            if img.name in seen:
+                raise ValueError(
+                    f"filename collision in split={split}: {img.name} "
+                    f"appears twice (rename source images to make them unique)"
+                )
+            seen.add(img.name)
+            dst_img = out_root / "images" / split / img.name
+            dst_lab = out_root / "labels" / split / lab.name
+            dst_img.symlink_to(img.resolve())
+            dst_lab.symlink_to(lab.resolve())
+
+
+def write_dataset_yaml(
+    data_root: Path, yaml_path: Path, class_names: List[str]
+) -> None:
+    """Emit the minimal ultralytics dataset yaml."""
+    lines = [
+        f"path: {data_root.resolve()}",
+        "train: images/train",
+        "val: images/val",
+        "test: images/test",
+        "names:",
+    ]
+    for i, name in enumerate(class_names):
+        lines.append(f"  {i}: {name}")
+    yaml_path.write_text("\n".join(lines) + "\n")
+
+
+def prepare(
+    dataset_root: Path,
+    training_root: Path,
+    rebuild: bool = False,
+    seed: int = 42,
+    class_names: Sequence[str] = ("bell",),
+) -> Path:
+    """Top-level: pair -> split -> symlink -> yaml. Returns yaml path.
+
+    Idempotent: if dataset.yaml already exists and rebuild=False, returns
+    immediately without touching anything.
+    """
+    yaml_path = training_root / "dataset.yaml"
+    data_root = training_root / "data"
+
+    if yaml_path.is_file() and not rebuild:
+        return yaml_path
+
+    if rebuild and data_root.exists():
+        shutil.rmtree(data_root)
+    if rebuild and yaml_path.exists():
+        yaml_path.unlink()
+
+    training_root.mkdir(parents=True, exist_ok=True)
+
+    pairs_by_scenario: Dict[str, List[Tuple[Path, Path]]] = {}
+    for sid, imgs_dir, labels_dir in discover_scenarios(dataset_root):
+        pairs_by_scenario[sid] = pair_images_with_labels(imgs_dir, labels_dir)
+
+    splits = stratified_split(pairs_by_scenario, seed=seed)
+    build_symlink_tree(splits, data_root)
+    write_dataset_yaml(data_root, yaml_path, list(class_names))
+
+    print(f"[prepare] scenarios: {len(pairs_by_scenario)}  "
+          f"train={len(splits['train'])}  val={len(splits['val'])}  "
+          f"test={len(splits['test'])}")
+    print(f"[prepare] dataset.yaml -> {yaml_path}")
+    return yaml_path
