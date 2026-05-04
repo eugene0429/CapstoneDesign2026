@@ -156,3 +156,32 @@ class WheelMotorClient:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.disconnect()
+
+
+# ───────────────────────────── CLI ─────────────────────────────
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="Wheel motor client — single-shot bench test")
+    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--wL", type=float, default=0.0, help="left wheel ω [rad/s]")
+    ap.add_argument("--wR", type=float, default=0.0, help="right wheel ω [rad/s]")
+    ap.add_argument("--ping", action="store_true",
+                    help="send PING and print result, then exit")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    cfg = WheelMotorConfig(
+        port=args.port, baud=args.baud,
+        dry_run=args.dry_run, verbose=args.verbose,
+    )
+    with WheelMotorClient(cfg) as mc:
+        if args.ping:
+            ok = mc.ping()
+            print(f"PING → {'PONG' if ok else 'FAIL'}")
+        else:
+            mc.drive(args.wL, args.wR)
+            print(f"sent DRIVE {args.wL:+.3f} {args.wR:+.3f} rad/s")
