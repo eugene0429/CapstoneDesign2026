@@ -319,7 +319,13 @@ INPUT: pose (None | dict with tracking_ok)
 NOW = time.monotonic()
 
 A) pose is None or not pose["tracking_ok"]:
-     if lost_since is None: lost_since = NOW
+     if lost_since is None:
+         # Back-date to the last accepted pose's timestamp so the
+         # lost-duration counts from when tracking was last known good,
+         # not from this consecutive-lost streak's first frame. (Single
+         # dropped frames after a long OK gap should still trigger the
+         # warn window — the system has been "blind" for that whole gap.)
+         lost_since = last_ok.t if last_ok is not None else NOW
      dur = NOW - lost_since
      if dur < lost_quiet_sec:                   return "HOLD"   # silent
      if dur < lost_quiet_sec + lost_warn_sec:
