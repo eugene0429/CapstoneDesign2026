@@ -276,6 +276,7 @@ def _run_loop(args, loc, ctrl, motor, safety) -> int:
         action = safety.check(pose)
         if action == "ABORT":
             print(f"[ABORT] {safety.reason}")
+            motor.drive(0.0, 0.0)               # immediate stop on supervisor abort
             return 2
         if action == "HOLD":
             motor.drive(0.0, 0.0)
@@ -291,8 +292,15 @@ def _run_loop(args, loc, ctrl, motor, safety) -> int:
         # fixed-period sleep: keeps 15 Hz even when SLAM I/O jitters
         sleep_for = max(0.0, period - (time.monotonic() - t0))
         time.sleep(sleep_for)
+    motor.drive(0.0, 0.0)                       # immediate stop on timeout
     return 1   # timeout
 ```
+
+Both `_run_loop`'s ABORT and timeout exits issue an explicit `motor.drive(0, 0)`
+in addition to the `try/finally` zero-stop in `main()`. Defense in depth: the
+firmware watchdog (200ms) is the floor; the in-loop zero-stops give immediate
+0-velocity on every exit path; the `finally` block backs them up if any path
+short-circuits.
 
 `_log_status(pose, out)` emits a single line matching `pipeline.phase1_driving`'s
 format: `[t]  pose=(x,y,θ°)  dist=...  v=...  ω_L/R=(...)`. Printed via
@@ -319,7 +327,13 @@ INPUT: pose (None | dict with tracking_ok)
 NOW = time.monotonic()
 
 A) pose is None or not pose["tracking_ok"]:
-     if lost_since is None: lost_since = NOW
+     if lost_since is None:
+         # Back-date to the last accepted pose's timestamp so the
+         # lost-duration counts from when tracking was last known good,
+         # not from this consecutive-lost streak's first frame. (Single
+         # dropped frames after a long OK gap should still trigger the
+         # warn window — the system has been "blind" for that whole gap.)
+         lost_since = last_ok.t if last_ok is not None else NOW
      dur = NOW - lost_since
      if dur < lost_quiet_sec:                   return "HOLD"   # silent
      if dur < lost_quiet_sec + lost_warn_sec:
