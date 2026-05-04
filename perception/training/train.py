@@ -30,10 +30,12 @@ def parse_args():
     )
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--imgsz", type=int, default=640)
-    ap.add_argument("--batch", type=int, default=-1,
-                    help="-1 = ultralytics auto batch (default)")
-    ap.add_argument("--device", default="0",
-                    help="cuda device id, 'cpu', or comma list e.g. '0,1'")
+    ap.add_argument("--batch", type=int, default=64,
+                    help="total batch across all GPUs (must be multiple of "
+                         "device count; auto-batch -1 is single-GPU only)")
+    ap.add_argument("--device", default="0,1",
+                    help="cuda device id, 'cpu', or comma list e.g. '0,1' "
+                         "(DDP multi-GPU when >1)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--patience", type=int, default=30)
     ap.add_argument("--name", default="bell_yolo26n")
@@ -88,11 +90,12 @@ def main():
 
     print(f"\n[train] evaluating {best_pt} on test split ...")
     best = YOLO(str(best_pt))
+    val_device = args.device.split(",")[0] if isinstance(args.device, str) else args.device
     metrics = best.val(
         data=str(yaml_path),
         split="test",
         imgsz=args.imgsz,
-        device=args.device,
+        device=val_device,
         project=str(DEFAULT_PROJECT),
         name=f"{args.name}_test",
     )
