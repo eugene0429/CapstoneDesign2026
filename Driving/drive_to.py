@@ -168,7 +168,7 @@ def _run_loop(
                 pose["x"], pose["y"], pose["theta"], args.x, args.y)
             if out["reached"]:
                 motor.drive(0.0, 0.0)
-                log(f"reached @ dist={out['distance']:.3f}m")
+                log(f"✓ reached @ dist={out['distance']:.3f}m")
                 return 0
             motor.drive(out["wheel_omega_left"], out["wheel_omega_right"])
             if t0 - last_log_at >= 0.5:
