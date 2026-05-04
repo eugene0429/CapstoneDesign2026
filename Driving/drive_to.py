@@ -61,9 +61,33 @@ class SafetySupervisor:
         self._last_warn_at: float = -1e9
 
     def check(self, pose: Optional[Dict]) -> str:
-        # Lost-tracking and pose-jump branches are added in later tasks.
-        # For now: accept every frame.
+        c = self.cfg
         t = self._now()
+
+        # Branch A: tracking lost or pose unavailable
+        if pose is None or not pose.get("tracking_ok", False):
+            if self._lost_since is None:
+                # back-date to last known-good timestamp so the quiet/warn
+                # window counts from the moment tracking was last confirmed
+                last_t = self._last_ok[2] if self._last_ok is not None else t
+                self._lost_since = last_t
+            dur = t - self._lost_since
+            if dur < c.lost_quiet_sec:
+                return "HOLD"
+            if dur < c.lost_quiet_sec + c.lost_warn_sec:
+                if t - self._last_warn_at >= c.warn_log_period:
+                    self._log(f"[WARN] tracking lost {dur:.1f}s")
+                    self._last_warn_at = t
+                return "HOLD"
+            self.reason = (
+                f"tracking lost {dur:.1f}s "
+                f"(>= {c.lost_quiet_sec + c.lost_warn_sec:.1f}s)"
+            )
+            return "ABORT"
+
+        # POSE_JUMP_REJECTION_HOOK  (next task inserts here)
+
+        # accepted
         self._last_ok = (float(pose["x"]), float(pose["y"]), t)
         self._lost_since = None
         self._consec_outliers = 0
