@@ -259,5 +259,8 @@ class TestRunLoop(unittest.TestCase):
         # Three frames; we expect the second and third to issue HOLD -> drive(0,0)
         args = self._args(timeout=0.25)   # 0.25 / period ~= 3 iterations
         _ = _run_loop(args, loc, ctrl, motor, sup, now=clock, sleep=sleep_fn)
-        # At least the HOLD frames should have produced (0.0, 0.0).
-        self.assertIn((0.0, 0.0), motor.calls)
+        # First frame is OK -> nonzero drive; subsequent HOLD frames must each
+        # issue (0,0). Counting >= 2 zeros distinguishes the HOLD branch from
+        # the single zero the timeout-exit path would emit on its own.
+        self.assertEqual(motor.calls[0], (1.0, 1.0))
+        self.assertGreaterEqual(motor.calls.count((0.0, 0.0)), 2)
