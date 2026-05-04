@@ -71,3 +71,15 @@ class TestDriveQuantization(unittest.TestCase):
         c.drive(1.0, -1.0)
         c.drive(0.0, 0.0)
         self.assertEqual(c.sent_lines, ["DRIVE 0 0", "DRIVE 1000 -1000", "DRIVE 0 0"])
+
+
+class TestPingStop(unittest.TestCase):
+    def test_ping_returns_true_in_dry_run(self):
+        c = WheelMotorClient(WheelMotorConfig(dry_run=True))
+        self.assertTrue(c.ping())
+        self.assertEqual(c.sent_lines, ["PING"])
+
+    def test_stop_returns_true_in_dry_run(self):
+        c = WheelMotorClient(WheelMotorConfig(dry_run=True))
+        self.assertTrue(c.stop())
+        self.assertEqual(c.sent_lines, ["STOP"])

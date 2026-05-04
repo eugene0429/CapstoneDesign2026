@@ -66,6 +66,12 @@ class WheelMotorClient:
         line = _DRIVE_FMT.format(wL=wL_mrad, wR=wR_mrad)
         self._send_line(line, expect_reply=False)
 
+    def ping(self) -> bool:
+        return self._send_line(_PING, expect_reply=True) == _PONG
+
+    def stop(self) -> bool:
+        return self._send_line(_STOP, expect_reply=True) == _OK
+
     # ────────────────────────── helpers ──────────────────────────
     def _prepare_drive_pair(self, wL_rad_s: float, wR_rad_s: float) -> tuple[int, int]:
         c = self.cfg
