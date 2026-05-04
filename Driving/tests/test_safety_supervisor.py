@@ -98,3 +98,52 @@ class TestSupervisorLostEscalation(unittest.TestCase):
         # treat next pose as fresh; no new lost
         self.assertEqual(self.sup.check(_ok(0.001, 0.0)), "OK")
         self.assertEqual(self.logs, [])
+
+
+class TestSupervisorPoseJump(unittest.TestCase):
+    def setUp(self):
+        self.clock = _Clock()
+        self.logs: List[str] = []
+        # max_linear_vel=0.3, jump_factor=3 → at dt=0.067s, threshold = 0.06m
+        self.sup = SafetySupervisor(
+            cfg=SafetyConfig(max_linear_vel=0.3, jump_factor=3.0,
+                             jump_outlier_max=3),
+            now=self.clock,
+            log=self.logs.append,
+        )
+
+    def test_single_jump_holds_then_recovers(self):
+        self.assertEqual(self.sup.check(_ok(0.0, 0.0)), "OK")
+        self.clock.advance(0.067)                    # threshold ≈ 0.06 m
+        self.assertEqual(self.sup.check(_ok(1.0, 0.0)), "HOLD")  # 1m jump
+        self.clock.advance(0.067)
+        # next plausible pose (close to last_ok=(0,0)) → OK, counter resets
+        self.assertEqual(self.sup.check(_ok(0.01, 0.0)), "OK")
+
+    def test_three_consecutive_jumps_abort(self):
+        self.assertEqual(self.sup.check(_ok(0.0, 0.0)), "OK")
+        for i in range(3):
+            self.clock.advance(0.067)
+            res = self.sup.check(_ok(10.0 + i, 0.0))
+            if i < 2:
+                self.assertEqual(res, "HOLD")
+            else:
+                self.assertEqual(res, "ABORT")
+        self.assertIn("pose jump", self.sup.reason)
+
+    def test_non_consecutive_jump_does_not_accumulate(self):
+        self.assertEqual(self.sup.check(_ok(0.0, 0.0)), "OK")
+        self.clock.advance(0.067)
+        self.assertEqual(self.sup.check(_ok(5.0, 0.0)), "HOLD")     # jump 1
+        self.clock.advance(0.067)
+        self.assertEqual(self.sup.check(_ok(0.01, 0.0)), "OK")       # reset
+        self.clock.advance(0.067)
+        self.assertEqual(self.sup.check(_ok(5.0, 0.0)), "HOLD")     # jump 1 again, not 2
+        self.clock.advance(0.067)
+        self.assertEqual(self.sup.check(_ok(0.02, 0.0)), "OK")
+
+    def test_long_dt_disables_jump_check(self):
+        # If dt >= 1s (e.g. after a long pause), don't classify as a jump.
+        self.assertEqual(self.sup.check(_ok(0.0, 0.0)), "OK")
+        self.clock.advance(1.5)
+        self.assertEqual(self.sup.check(_ok(2.0, 0.0)), "OK")

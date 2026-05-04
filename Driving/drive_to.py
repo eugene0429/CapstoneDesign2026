@@ -85,7 +85,22 @@ class SafetySupervisor:
             )
             return "ABORT"
 
-        # POSE_JUMP_REJECTION_HOOK  (next task inserts here)
+        # pose-jump rejection (only when we have a prior accepted pose)
+        if self._last_ok is not None:
+            ox, oy, ot = self._last_ok
+            dt = t - ot
+            if 0.0 < dt < 1.0:
+                jump = math.hypot(float(pose["x"]) - ox, float(pose["y"]) - oy)
+                threshold = c.max_linear_vel * dt * c.jump_factor
+                if jump > threshold:
+                    self._consec_outliers += 1
+                    if self._consec_outliers >= c.jump_outlier_max:
+                        self.reason = (
+                            f"pose jump x{c.jump_outlier_max} "
+                            f"(last={jump:.2f}m in {dt*1000:.0f}ms)"
+                        )
+                        return "ABORT"
+                    return "HOLD"
 
         # accepted
         self._last_ok = (float(pose["x"]), float(pose["y"]), t)
