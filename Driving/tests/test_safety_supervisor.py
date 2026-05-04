@@ -147,3 +147,117 @@ class TestSupervisorPoseJump(unittest.TestCase):
         self.assertEqual(self.sup.check(_ok(0.0, 0.0)), "OK")
         self.clock.advance(1.5)
         self.assertEqual(self.sup.check(_ok(2.0, 0.0)), "OK")
+
+
+from Driving.drive_to import RunArgs, _run_loop
+
+
+class _FakeLocalizer:
+    def __init__(self, poses):
+        self._poses = list(poses)
+    def get_pose(self):
+        if not self._poses:
+            return None
+        return self._poses.pop(0)
+
+
+class _FakeMotor:
+    def __init__(self):
+        self.calls: List[Tuple[float, float]] = []
+    def drive(self, wL, wR):
+        self.calls.append((wL, wR))
+
+
+class _FakeController:
+    """Returns a fixed (small) command and reports reached after N calls."""
+    def __init__(self, reach_after: int):
+        self.calls = 0
+        self._reach_after = reach_after
+    def compute(self, x, y, theta, tx, ty):
+        self.calls += 1
+        return {
+            "wheel_omega_left": 1.0,
+            "wheel_omega_right": 1.0,
+            "v": 0.1, "omega": 0.0,
+            "distance": 0.05 if self.calls >= self._reach_after else 1.0,
+            "angle_error": 0.0,
+            "reached": self.calls >= self._reach_after,
+        }
+
+
+class _SleepNoop:
+    def __init__(self): self.calls = 0
+    def __call__(self, _seconds): self.calls += 1
+
+
+class TestRunLoop(unittest.TestCase):
+    def _args(self, **overrides):
+        defaults = dict(x=1.0, y=0.0, rate=15.0, timeout=10.0,
+                        port="/dev/null", baud=115200,
+                        dry_run=True, verbose=False)
+        defaults.update(overrides)
+        return RunArgs(**defaults)
+
+    def test_reaches_target_returns_zero(self):
+        clock = _Clock()
+        sup = SafetySupervisor(SafetyConfig(), now=clock, log=lambda _m: None)
+        loc = _FakeLocalizer([_ok(0.0, 0.0), _ok(0.01, 0.0), _ok(0.02, 0.0)])
+        motor = _FakeMotor()
+        ctrl = _FakeController(reach_after=3)
+        sleep = _SleepNoop()
+
+        rc = _run_loop(self._args(), loc, ctrl, motor, sup,
+                       now=clock, sleep=sleep)
+        self.assertEqual(rc, 0)
+        # last call must be (0, 0) per "send zero on reach" requirement
+        self.assertEqual(motor.calls[-1], (0.0, 0.0))
+
+    def test_abort_from_supervisor_returns_two(self):
+        clock = _Clock()
+        sup = SafetySupervisor(
+            SafetyConfig(lost_quiet_sec=0.0, lost_warn_sec=0.0),
+            now=clock, log=lambda _m: None,
+        )
+        # First pose triggers ABORT (lost from frame 1, total threshold = 0)
+        loc = _FakeLocalizer([_lost()])
+        motor = _FakeMotor()
+        ctrl = _FakeController(reach_after=999)
+        sleep = _SleepNoop()
+
+        rc = _run_loop(self._args(), loc, ctrl, motor, sup,
+                       now=clock, sleep=sleep)
+        self.assertEqual(rc, 2)
+
+    def test_timeout_returns_one(self):
+        clock = _Clock()
+        sup = SafetySupervisor(SafetyConfig(), now=clock, log=lambda _m: None)
+        # Endless OK frames; controller never reaches.
+        loc = _FakeLocalizer([_ok(0.0, 0.0)] * 10000)
+        motor = _FakeMotor()
+        ctrl = _FakeController(reach_after=10**9)
+        # advance the clock inside sleep so timeout actually fires
+        period = 1.0 / 15.0
+
+        def sleep_fn(_secs):
+            clock.advance(period)
+
+        args = self._args(timeout=0.5)   # <= 8 iterations at 15 Hz
+        rc = _run_loop(args, loc, ctrl, motor, sup, now=clock, sleep=sleep_fn)
+        self.assertEqual(rc, 1)
+
+    def test_hold_sends_zero_velocity(self):
+        clock = _Clock()
+        sup = SafetySupervisor(SafetyConfig(lost_quiet_sec=0.5),
+                               now=clock, log=lambda _m: None)
+        loc = _FakeLocalizer([_ok(0.0, 0.0), _lost(), _lost()])
+        motor = _FakeMotor()
+        ctrl = _FakeController(reach_after=999)
+
+        period = 1.0 / 15.0
+        def sleep_fn(_secs): clock.advance(period)
+
+        # Three frames; we expect the second and third to issue HOLD -> drive(0,0)
+        args = self._args(timeout=0.25)   # 0.25 / period ~= 3 iterations
+        _ = _run_loop(args, loc, ctrl, motor, sup, now=clock, sleep=sleep_fn)
+        # At least the HOLD frames should have produced (0.0, 0.0).
+        self.assertIn((0.0, 0.0), motor.calls)

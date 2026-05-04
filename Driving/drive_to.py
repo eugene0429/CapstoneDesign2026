@@ -107,3 +107,77 @@ class SafetySupervisor:
         self._lost_since = None
         self._consec_outliers = 0
         return "OK"
+
+
+# ──────────────────────────── runner ────────────────────────────
+@dataclass
+class RunArgs:
+    x: float
+    y: float
+    rate: float = 15.0
+    timeout: float = 60.0
+    port: str = "/dev/ttyACM0"
+    baud: int = 115200
+    dry_run: bool = False
+    verbose: bool = False
+
+
+def _log_status(t_elapsed, pose, out, log: Callable[[str], None]) -> None:
+    log(
+        f"  [{t_elapsed:5.2f}s]  pose=("
+        f"{pose['x']:+.2f}, {pose['y']:+.2f}, "
+        f"{math.degrees(pose['theta']):+6.1f}°)  "
+        f"dist={out['distance']:.2f}  v={out['v']:.2f}  "
+        f"ω_L/R=({out['wheel_omega_left']:+.2f}, "
+        f"{out['wheel_omega_right']:+.2f})"
+    )
+
+
+def _run_loop(
+    args: RunArgs,
+    localizer,
+    controller,
+    motor,
+    supervisor: SafetySupervisor,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    log: Callable[[str], None] = print,
+) -> int:
+    """Main 15 Hz control loop. Returns a process exit code:
+    0 = reached, 1 = timeout, 2 = supervisor ABORT.
+    """
+    period = 1.0 / args.rate
+    t_start = now()
+    deadline = t_start + args.timeout
+    last_log_at = -1e9
+
+    while now() < deadline:
+        t0 = now()
+        pose = localizer.get_pose()
+        action = supervisor.check(pose)
+
+        if action == "ABORT":
+            log(f"[ABORT] {supervisor.reason}")
+            motor.drive(0.0, 0.0)
+            return 2
+
+        if action == "HOLD":
+            motor.drive(0.0, 0.0)
+        else:  # OK
+            out = controller.compute(
+                pose["x"], pose["y"], pose["theta"], args.x, args.y)
+            if out["reached"]:
+                motor.drive(0.0, 0.0)
+                log(f"reached @ dist={out['distance']:.3f}m")
+                return 0
+            motor.drive(out["wheel_omega_left"], out["wheel_omega_right"])
+            if t0 - last_log_at >= 0.5:
+                _log_status(t0 - t_start, pose, out, log)
+                last_log_at = t0
+
+        elapsed = now() - t0
+        sleep(max(0.0, period - elapsed))
+
+    log(f"[TIMEOUT] {args.timeout:.1f}s elapsed, goal not reached")
+    motor.drive(0.0, 0.0)
+    return 1
