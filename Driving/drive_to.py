@@ -181,3 +181,81 @@ def _run_loop(
     log(f"[TIMEOUT] {args.timeout:.1f}s elapsed, goal not reached")
     motor.drive(0.0, 0.0)
     return 1
+
+
+# ───────────────────────────── main ─────────────────────────────
+def main(argv: Optional[list] = None) -> int:
+    import argparse
+    from pathlib import Path as _P
+
+    ap = argparse.ArgumentParser(
+        description="Phase-1 driving runner: target (x,y) + ORB-SLAM3 → wheel ω → OpenRB")
+    ap.add_argument("--x", type=float, required=True, help="target x [m, world frame]")
+    ap.add_argument("--y", type=float, required=True, help="target y [m, world frame]")
+    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--rate", type=float, default=15.0,
+                    help="control loop rate [Hz]")
+    ap.add_argument("--timeout", type=float, default=60.0,
+                    help="phase-1 timeout [s]")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="skip serial open; print DRIVE/STOP/PING lines")
+    ap.add_argument("--verbose", action="store_true",
+                    help="emit serial send/recv lines to stderr")
+    a = ap.parse_args(argv)
+
+    args = RunArgs(
+        x=a.x, y=a.y, rate=a.rate, timeout=a.timeout,
+        port=a.port, baud=a.baud, dry_run=a.dry_run, verbose=a.verbose,
+    )
+
+    # Repo layout: pipeline.py at the top level adds Driving/, perception/,
+    # LevelingPlatform/ to sys.path. We replicate the same idea so
+    # `from vio.orbslam_localizer ...`, `from controller ...`, and
+    # `from wheel_motor ...` all resolve regardless of cwd.
+    repo_root = _P(__file__).resolve().parents[1]
+    for sub in ("Driving", "perception"):
+        p = str(repo_root / sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    from controller import ControllerConfig, DrivingController  # noqa: E402
+    from wheel_motor import WheelMotorClient, WheelMotorConfig  # noqa: E402
+    from vio.orbslam_localizer import LocalizerConfig, OrbSlamLocalizer  # noqa: E402
+
+    ctrl = DrivingController(ControllerConfig(dt=1.0 / args.rate))
+    motor = WheelMotorClient(WheelMotorConfig(
+        port=args.port, baud=args.baud,
+        dry_run=args.dry_run, verbose=args.verbose,
+    ))
+    loc = OrbSlamLocalizer(LocalizerConfig())
+    supervisor = SafetySupervisor(SafetyConfig())
+
+    print("=" * 70)
+    print(f"  drive_to → target=({args.x:+.2f}, {args.y:+.2f}) "
+          f"rate={args.rate}Hz timeout={args.timeout}s "
+          f"{'(DRY-RUN)' if args.dry_run else ''}")
+    print("=" * 70)
+
+    with loc, motor:
+        if not args.dry_run:
+            if not motor.ping():
+                print("[FAIL] OpenRB PING failed", file=sys.stderr)
+                return 2
+        if not loc.wait_for_tracking(timeout=30.0):
+            print("[FAIL] SLAM did not reach tracking OK within 30s",
+                  file=sys.stderr)
+            return 2
+
+        try:
+            return _run_loop(args, loc, ctrl, motor, supervisor)
+        finally:
+            try:
+                motor.drive(0.0, 0.0)
+            except Exception:
+                pass
+            # synchronous STOP is sent by motor.disconnect() via __exit__
+
+
+if __name__ == "__main__":
+    sys.exit(main())
