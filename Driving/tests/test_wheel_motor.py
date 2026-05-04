@@ -22,3 +22,52 @@ class TestWheelMotorClientConstruction(unittest.TestCase):
         client = WheelMotorClient(WheelMotorConfig(dry_run=True))
         self.assertTrue(client.cfg.dry_run)
         self.assertEqual(client.sent_lines, [])
+
+
+class TestDriveQuantization(unittest.TestCase):
+    def _client(self, **cfg_overrides):
+        cfg = WheelMotorConfig(dry_run=True, **cfg_overrides)
+        return WheelMotorClient(cfg)
+
+    def test_zero_zero_emits_zero_zero(self):
+        c = self._client()
+        c.drive(0.0, 0.0)
+        self.assertEqual(c.sent_lines, ["DRIVE 0 0"])
+
+    def test_quantizes_to_mrad_per_sec(self):
+        c = self._client()
+        c.drive(1.234, -2.345)
+        self.assertEqual(c.sent_lines, ["DRIVE 1234 -2345"])
+
+    def test_rounds_to_nearest_mrad(self):
+        c = self._client()
+        c.drive(0.0014, -0.0016)   # 1.4 → 1, -1.6 → -2
+        # both inside deadzone (|w| < 5 mrad) → forced to 0
+        self.assertEqual(c.sent_lines, ["DRIVE 0 0"])
+
+    def test_deadzone_zeros_both_when_both_below(self):
+        c = self._client()
+        c.drive(0.003, -0.004)   # 3 and -4 mrad, both < 5 → 0 0
+        self.assertEqual(c.sent_lines, ["DRIVE 0 0"])
+
+    def test_deadzone_does_not_zero_when_one_side_above(self):
+        c = self._client()
+        c.drive(0.003, 1.0)   # 3 mrad (inside) and 1000 mrad (outside) → keep 3
+        self.assertEqual(c.sent_lines, ["DRIVE 3 1000"])
+
+    def test_clamps_to_max(self):
+        c = self._client()
+        c.drive(50.0, -50.0)
+        self.assertEqual(c.sent_lines, ["DRIVE 30000 -30000"])
+
+    def test_direction_signs_flip_right_wheel(self):
+        c = self._client(direction_signs=(+1, -1))
+        c.drive(1.0, 1.0)
+        self.assertEqual(c.sent_lines, ["DRIVE 1000 -1000"])
+
+    def test_multiple_calls_accumulate_in_sent_lines(self):
+        c = self._client()
+        c.drive(0.0, 0.0)
+        c.drive(1.0, -1.0)
+        c.drive(0.0, 0.0)
+        self.assertEqual(c.sent_lines, ["DRIVE 0 0", "DRIVE 1000 -1000", "DRIVE 0 0"])

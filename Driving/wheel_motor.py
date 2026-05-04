@@ -58,3 +58,57 @@ class WheelMotorClient:
         self.cfg = cfg if cfg is not None else WheelMotorConfig()
         self._ser = None
         self.sent_lines: List[str] = []   # populated only when dry_run=True
+
+    # ─────────────────────────── public API ───────────────────────────
+    def drive(self, wL_rad_s: float, wR_rad_s: float) -> None:
+        """Fire-and-forget: write one DRIVE line. Quantize, sign, clamp, deadzone."""
+        wL_mrad, wR_mrad = self._prepare_drive_pair(wL_rad_s, wR_rad_s)
+        line = _DRIVE_FMT.format(wL=wL_mrad, wR=wR_mrad)
+        self._send_line(line, expect_reply=False)
+
+    # ────────────────────────── helpers ──────────────────────────
+    def _prepare_drive_pair(self, wL_rad_s: float, wR_rad_s: float) -> tuple[int, int]:
+        c = self.cfg
+        wL = int(round(wL_rad_s * 1000.0)) * c.direction_signs[0]
+        wR = int(round(wR_rad_s * 1000.0)) * c.direction_signs[1]
+        # clamp
+        wL = max(-c.max_wheel_mrad_s, min(c.max_wheel_mrad_s, wL))
+        wR = max(-c.max_wheel_mrad_s, min(c.max_wheel_mrad_s, wR))
+        # deadzone (both sides below → both zero; preserves explicit 0,0 stops)
+        if abs(wL) < c.deadzone_mrad_s and abs(wR) < c.deadzone_mrad_s:
+            wL = 0
+            wR = 0
+        return wL, wR
+
+    def _send_line(self, line: str, expect_reply: bool) -> Optional[str]:
+        self._log(f"→ {line}")
+        if self.cfg.dry_run:
+            self.sent_lines.append(line)
+            if expect_reply:
+                return self._dry_run_response(line)
+            return None
+        if self._ser is None:
+            raise RuntimeError("not connected (call connect() or use context manager)")
+        self._ser.write((line + "\n").encode("ascii"))
+        self._ser.flush()
+        if not expect_reply:
+            return None
+        raw = self._ser.readline()
+        if not raw:
+            raise TimeoutError(f"no response to {line!r} within "
+                               f"{self.cfg.sync_read_timeout_sec}s")
+        resp = raw.decode("ascii", errors="replace").rstrip("\r\n")
+        self._log(f"← {resp}")
+        return resp
+
+    @staticmethod
+    def _dry_run_response(line: str) -> str:
+        if line == _PING:
+            return _PONG
+        if line == _STOP:
+            return _OK
+        return ""   # DRIVE has no reply
+
+    def _log(self, msg: str) -> None:
+        if self.cfg.verbose:
+            print(f"[wheel] {msg}", file=sys.stderr)
