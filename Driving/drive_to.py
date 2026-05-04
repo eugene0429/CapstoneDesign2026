@@ -249,11 +249,17 @@ def main(argv: Optional[list] = None) -> int:
 
         try:
             return _run_loop(args, loc, ctrl, motor, supervisor)
+        except KeyboardInterrupt:
+            print("\n[INTERRUPT] Ctrl-C — stopping", file=sys.stderr)
+            return 130
+        except Exception as e:
+            print(f"[CRASH] {type(e).__name__}: {e}", file=sys.stderr)
+            return 2
         finally:
             try:
                 motor.drive(0.0, 0.0)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[finally] zero-stop failed: {e}", file=sys.stderr)
             # synchronous STOP is sent by motor.disconnect() via __exit__
 
 
