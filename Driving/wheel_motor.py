@@ -118,3 +118,41 @@ class WheelMotorClient:
     def _log(self, msg: str) -> None:
         if self.cfg.verbose:
             print(f"[wheel] {msg}", file=sys.stderr)
+
+    # ─────────────────────────── lifecycle ───────────────────────────
+    def connect(self) -> None:
+        if self.cfg.dry_run:
+            self._log("[dry-run] skip serial open")
+            return
+        import serial   # lazy import; pyserial unneeded for dry-run / tests
+        self._ser = serial.Serial(
+            port=self.cfg.port,
+            baudrate=self.cfg.baud,
+            timeout=self.cfg.sync_read_timeout_sec,
+            write_timeout=self.cfg.write_timeout_sec,
+        )
+        time.sleep(self.cfg.open_settle_sec)
+        self._ser.reset_input_buffer()
+        self._ser.reset_output_buffer()
+        self._log(f"[open] {self.cfg.port} @ {self.cfg.baud}")
+
+    def disconnect(self) -> None:
+        # Always attempt a final STOP; swallow errors so finally-paths are robust.
+        try:
+            self.stop()
+        except Exception:
+            pass
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            except Exception:
+                pass
+            self._ser = None
+        self._log("[close]")
+
+    def __enter__(self) -> "WheelMotorClient":
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.disconnect()

@@ -83,3 +83,23 @@ class TestPingStop(unittest.TestCase):
         c = WheelMotorClient(WheelMotorConfig(dry_run=True))
         self.assertTrue(c.stop())
         self.assertEqual(c.sent_lines, ["STOP"])
+
+
+class TestLifecycle(unittest.TestCase):
+    def test_context_manager_does_not_raise_in_dry_run(self):
+        with WheelMotorClient(WheelMotorConfig(dry_run=True)) as c:
+            c.drive(1.0, 1.0)
+        # On exit, disconnect() should send STOP. In dry-run, that
+        # appears in sent_lines.
+        self.assertEqual(c.sent_lines[-1], "STOP")
+
+    def test_disconnect_when_never_connected_is_safe(self):
+        c = WheelMotorClient(WheelMotorConfig(dry_run=True))
+        c.disconnect()   # should not raise even though connect() never called
+        # in dry-run, disconnect sends STOP unconditionally
+        self.assertEqual(c.sent_lines, ["STOP"])
+
+    def test_connect_dry_run_is_noop(self):
+        c = WheelMotorClient(WheelMotorConfig(dry_run=True))
+        c.connect()      # must not try to import or open pyserial
+        self.assertIsNone(c._ser)
